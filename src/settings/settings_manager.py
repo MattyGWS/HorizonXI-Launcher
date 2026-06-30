@@ -153,7 +153,10 @@ class SettingsManager:
             raise RuntimeError("Could not find FFXiPadConfig.exe in the game install.")
 
         try:
-            UMU_RUN.chmod(UMU_RUN.stat().st_mode | 0o111)
+            # Only chmod the bundled umu-run when running from source.
+            # Inside Flatpak /app is read-only.
+            if UMU_RUN.exists() and not str(UMU_RUN).startswith("/app/"):
+                UMU_RUN.chmod(UMU_RUN.stat().st_mode | 0o111)
         except Exception:
             pass
 

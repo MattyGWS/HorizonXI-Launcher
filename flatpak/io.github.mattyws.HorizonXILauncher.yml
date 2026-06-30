@@ -1,0 +1,45 @@
+app-id: io.github.mattyws.HorizonXILauncher
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+command: horizonxi-launcher
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=x11
+  - --socket=wayland
+  - --device=dri
+  - --allow=devel
+  - --filesystem=xdg-download
+  - --filesystem=xdg-documents
+  - --env=FLATPAK_ID=io.github.mattyws.HorizonXILauncher
+modules:
+  - name: aria2
+    buildsystem: autotools
+    config-opts:
+      - --disable-nls
+      - --without-libxml2
+      - --without-sqlite3
+      - --without-libssh2
+      - --with-gnutls
+      - --without-openssl
+    sources:
+      - type: archive
+        url: https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0.tar.xz
+        sha256: 60a420ad7085eb616cb6e2bdf0a7206d68ff3d37fb5a956dc44242eb2f79b66b
+
+  - name: horizonxi-launcher
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/share/horizonxi-launcher
+      - cp -a src /app/share/horizonxi-launcher/src
+      - cp -a bin /app/share/horizonxi-launcher/bin
+      - chmod +x /app/share/horizonxi-launcher/bin/umu-run || true
+      - install -Dm755 bin/umu-run /app/bin/umu-run
+      - install -Dm755 flatpak/horizonxi-launcher-wrapper /app/bin/horizonxi-launcher
+      - install -Dm644 data/io.github.mattyws.HorizonXILauncher.desktop /app/share/applications/io.github.mattyws.HorizonXILauncher.desktop
+      - install -Dm644 data/io.github.mattyws.HorizonXILauncher.metainfo.xml /app/share/metainfo/io.github.mattyws.HorizonXILauncher.metainfo.xml
+      - install -Dm644 data/io.github.mattyws.HorizonXILauncher.svg /app/share/icons/hicolor/scalable/apps/io.github.mattyws.HorizonXILauncher.svg
+    sources:
+      - type: dir
+        path: ..

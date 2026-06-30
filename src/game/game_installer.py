@@ -335,23 +335,41 @@ class GameInstallManager:
         if not vc_redist.exists():
             raise RuntimeError(f"Required VC++ redistributable not found: {vc_redist}")
 
+        command = [
+            str(UMU_RUN),
+            str(vc_redist),
+            "/install",
+            "/quiet",
+            "/norestart",
+        ]
+
+        print()
+        print("================================================")
+        print("Installing VC++ 2015-2022 x86 Runtime")
+        print("Working directory:", self.game_dir)
+        print("Installer path:", vc_redist)
+        print("Command:", " ".join(command))
+        print("================================================")
+
         result = subprocess.run(
-            [
-                str(UMU_RUN),
-                "../Downloads/Prereqs/Visual C++ Redistributable for Visual Studio 2015-2022/VC_redist.x86.exe",
-                "/install",
-                "/quiet",
-                "/norestart",
-            ],
+            command,
             cwd=str(self.game_dir),
             env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
             check=False,
         )
+
+        if result.stdout:
+            print(result.stdout)
+
+        print("VC_REDIST_X86_EXIT_CODE =", result.returncode)
 
         if result.returncode not in (0, 3010, 1638):
             raise RuntimeError(
                 "VC++ 2015-2022 x86 runtime installer failed "
-                f"with exit code {result.returncode}."
+                f"with exit code {result.returncode}. See terminal output above for details."
             )
 
     def fetch_json(self, url: str):

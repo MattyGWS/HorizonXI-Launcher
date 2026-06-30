@@ -1,0 +1,9 @@
+The aria2 module now uses the official release tarball instead of the git repository.
+
+Before building, replace REPLACE_WITH_SHA256 in
+flatpak/io.github.mattyws.HorizonXILauncher.yml
+with the SHA256 of aria2-1.37.0.tar.xz.
+
+Example:
+curl -L -o /tmp/aria2.tar.xz https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0.tar.xz
+sha256sum /tmp/aria2.tar.xz
