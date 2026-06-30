@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <rect width="256" height="256" rx="48" fill="#1f1f24"/>
+  <circle cx="128" cy="128" r="84" fill="#2eaadc"/>
+  <path d="M45 146c38-35 68-22 91-47 18-19 39-18 75-3-6 47-42 91-92 91-31 0-56-15-74-41z" fill="#7bc96f"/>
+  <path d="M64 83c25-15 61-18 91 0 10 6 18 13 25 22-38-8-55-3-75 16-13 12-28 17-48 16-8-18-6-38 7-54z" fill="#e8f7ff" opacity="0.9"/>
+  <text x="128" y="151" text-anchor="middle" font-family="sans-serif" font-size="42" font-weight="700" fill="#ffffff">XI</text>
+</svg>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.mattyws.HorizonXILauncher</id>
+  <name>HorizonXI Launcher</name>
+  <summary>Linux launcher for HorizonXI</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <description>
+    <p>A Linux launcher for HorizonXI that installs, updates, configures, and launches the game through Proton/UMU.</p>
+  </description>
+  <launchable type="desktop-id">io.github.mattyws.HorizonXILauncher.desktop</launchable>
+</component>

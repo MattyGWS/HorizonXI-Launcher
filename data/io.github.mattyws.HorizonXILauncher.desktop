@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=HorizonXI Launcher
+Comment=Linux launcher wrapper for HorizonXI
+Exec=horizonxi-launcher
+Icon=io.github.mattyws.HorizonXILauncher
+Terminal=false
+Categories=Game;
