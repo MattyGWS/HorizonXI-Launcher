@@ -1,15 +1,19 @@
 import json
 import threading
 import urllib.request
+import zipfile
+from datetime import datetime
+from pathlib import Path
 
 import gi
 
 gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gio, GLib, Gtk
+from gi.repository import Adw, Gio, GLib, Gtk, Gdk
 
-from config import DATA_DIR
+from config import DATA_DIR, GAME_DIR
 from addons.addon_manager import AddonManager
 from addons.plugin_manager import PluginManager
 from settings.settings_manager import GameSettings, SettingsManager
@@ -133,6 +137,12 @@ class HorizonWindow(Adw.Application):
         self.window.present()
 
     def build_main_page(self):
+        main_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=10,
+        )
+        main_box.set_vexpand(False)
+
         content_box = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
             spacing=24,
@@ -164,17 +174,6 @@ class HorizonWindow(Adw.Application):
 
         left_box.append(status_group)
 
-        install_group = Adw.PreferencesGroup(
-            title="Maintenance",
-            description="Repair checks downloads, prerequisites, and installed game files.",
-        )
-
-        self.install_button = Gtk.Button(label="Repair Installation")
-        self.install_button.add_css_class("suggested-action")
-        self.install_button.connect("clicked", self.on_install_clicked)
-        install_group.add(self.install_button)
-
-        left_box.append(install_group)
 
         login_group = Adw.PreferencesGroup(title="Direct Game Launch")
 
@@ -211,7 +210,28 @@ class HorizonWindow(Adw.Application):
 
         right_box.append(login_group)
 
-        return content_box
+        main_box.append(content_box)
+
+        links_group = Adw.PreferencesGroup(title="HorizonXI Links")
+        links_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        links_box.set_homogeneous(True)
+
+        website_button = Gtk.Button(label="HorizonXI Website")
+        website_button.connect("clicked", self.on_open_link_clicked, "https://horizonxi.com/")
+        links_box.append(website_button)
+
+        wiki_button = Gtk.Button(label="HorizonXI Wiki")
+        wiki_button.connect("clicked", self.on_open_link_clicked, "https://horizonffxi.wiki/HorizonXI_Wiki")
+        links_box.append(wiki_button)
+
+        discord_button = Gtk.Button(label="HorizonXI Discord")
+        discord_button.connect("clicked", self.on_open_link_clicked, "https://discord.gg/horizonxi")
+        links_box.append(discord_button)
+
+        links_group.add(links_box)
+        main_box.append(links_group)
+
+        return main_box
 
     def build_addons_page(self):
         page = Gtk.Box(
@@ -551,6 +571,11 @@ class HorizonWindow(Adw.Application):
         self._add_resolution_setting(resolution_group, "window", "Window Resolution")
         self._add_resolution_setting(resolution_group, "background", "Background Resolution")
         self._add_resolution_setting(resolution_group, "menu", "Menu Resolution")
+
+        native_resolution_button = Gtk.Button(label="Use Monitor Native Resolution")
+        native_resolution_button.connect("clicked", self.on_use_native_resolution_clicked)
+        resolution_group.add(native_resolution_button)
+
         right.append(resolution_group)
 
         window_group = Adw.PreferencesGroup(title="Window")
@@ -628,6 +653,15 @@ class HorizonWindow(Adw.Application):
         open_folder_button = Gtk.Button(label="Open Game Folder")
         open_folder_button.connect("clicked", self.on_open_game_folder_clicked)
         tools_group.add(open_folder_button)
+
+        backup_macros_button = Gtk.Button(label="Backup Macros")
+        backup_macros_button.connect("clicked", self.on_backup_macros_clicked)
+        tools_group.add(backup_macros_button)
+
+        self.install_button = Gtk.Button(label="Repair Installation")
+        self.install_button.add_css_class("suggested-action")
+        self.install_button.connect("clicked", self.on_install_clicked)
+        tools_group.add(self.install_button)
 
         tools_box.append(tools_group)
 
@@ -775,6 +809,72 @@ class HorizonWindow(Adw.Application):
             fonts=int(self._get_spin("fonts")),
             mip_mapping=int(self._get_spin("mip_mapping")),
         )
+
+    def on_use_native_resolution_clicked(self, button):
+        resolution = self.get_monitor_native_resolution()
+
+        if resolution is None:
+            if self.status_label:
+                self.status_label.set_text("Could not detect monitor resolution.")
+            return
+
+        width, height = resolution
+
+        for key in ("window", "background", "menu"):
+            self._set_spin(f"{key}_width", width)
+            self._set_spin(f"{key}_height", height)
+
+        if self.status_label:
+            self.status_label.set_text(
+                f"Set window, background, and menu resolutions to {width}×{height}."
+            )
+
+    def get_monitor_native_resolution(self):
+        display = None
+
+        try:
+            if self.window:
+                display = self.window.get_display()
+        except Exception:
+            display = None
+
+        if display is None:
+            display = Gdk.Display.get_default()
+
+        if display is None:
+            return None
+
+        monitor = None
+
+        try:
+            if self.window and self.window.get_surface():
+                monitor = display.get_monitor_at_surface(self.window.get_surface())
+        except Exception:
+            monitor = None
+
+        if monitor is None:
+            try:
+                monitors = display.get_monitors()
+                if monitors and monitors.get_n_items() > 0:
+                    monitor = monitors.get_item(0)
+            except Exception:
+                monitor = None
+
+        if monitor is None:
+            return None
+
+        try:
+            geometry = monitor.get_geometry()
+            scale_factor = monitor.get_scale_factor()
+            width = int(geometry.width * scale_factor)
+            height = int(geometry.height * scale_factor)
+        except Exception:
+            return None
+
+        if width <= 0 or height <= 0:
+            return None
+
+        return width, height
 
     def on_save_settings_clicked(self, button):
         try:
@@ -1155,6 +1255,15 @@ class HorizonWindow(Adw.Application):
         except Exception as error:
             self.status_label.set_text(f"Launch failed: {error}")
 
+    def on_open_link_clicked(self, button, url):
+        try:
+            Gio.AppInfo.launch_default_for_uri(url, None)
+            if self.status_label:
+                self.status_label.set_text(f"Opened {url}")
+        except Exception as error:
+            if self.status_label:
+                self.status_label.set_text(f"Failed to open link: {error}")
+
     def launch_game_direct(self):
         username = self.username_entry.get_text().strip()
         password = self.password_entry.get_text()
@@ -1176,6 +1285,48 @@ class HorizonWindow(Adw.Application):
             self.status_label.set_text("HorizonXI game started.")
         except Exception as error:
             self.status_label.set_text(f"Direct launch failed: {error}")
+
+    def on_backup_macros_clicked(self, button):
+        try:
+            backup_path = self.backup_macros()
+            self.status_label.set_text(f"Macro backup created: {backup_path}")
+        except Exception as error:
+            self.status_label.set_text(f"Failed to backup macros: {error}")
+
+    def backup_macros(self):
+        user_dir = (
+            GAME_DIR
+            / "SquareEnix"
+            / "FINAL FANTASY XI"
+            / "USER"
+        )
+
+        if not user_dir.exists() or not user_dir.is_dir():
+            raise RuntimeError("Macro USER folder not found. Launch the game at least once first.")
+
+        documents_dir = self.get_documents_dir()
+        backup_dir = documents_dir / "HorizonMacroBackup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%H-%M-%S_%Y-%m-%d")
+        backup_file = backup_dir / f"HorizonMacroBackup_{timestamp}.zip"
+
+        with zipfile.ZipFile(backup_file, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path in user_dir.rglob("*"):
+                if not path.is_file():
+                    continue
+
+                archive_name = Path("USER") / path.relative_to(user_dir)
+                archive.write(path, archive_name)
+
+        return backup_file
+
+    def get_documents_dir(self):
+        documents = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOCUMENTS)
+        if documents:
+            return Path(documents)
+
+        return Path.home() / "Documents"
 
     def on_open_game_folder_clicked(self, button):
         try:
