@@ -5,10 +5,34 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from config import ASHITA_BOOT_CONFIG, DATA_DIR, GAME_DIR, UMU_RUN, PREFIX_DIR, PROTON_DIR
+from config import ASHITA_BOOT_CONFIG, DATA_DIR, GAME_DIR, UMU_RUN, PREFIX_DIR, PROTON_INSTALL_ROOT, GE_PROTON_VERSION, IS_FLATPAK, ensure_umu_run_available
 
 
 DEFAULT_SETTINGS_SNAPSHOT = DATA_DIR / "default-settings-ashita.ini"
+
+
+def _umu_command(args, env=None, cwd=None):
+    """Build a UMU command.
+
+    In Flatpak, run UMU on the host with flatpak-spawn so Proton can use the
+    host Mesa/GL stack instead of being trapped inside the launcher sandbox.
+    """
+    args = [str(arg) for arg in args]
+
+    if not IS_FLATPAK:
+        return [str(UMU_RUN), *args]
+
+    command = ["flatpak-spawn", "--host"]
+
+    if cwd is not None:
+        command.append(f"--directory={cwd}")
+
+    for key in ("WINEPREFIX", "PROTONPATH", "WINEDLLOVERRIDES"):
+        if env and key in env:
+            command.append(f"--env={key}={env[key]}")
+
+    command.extend([str(UMU_RUN), *args])
+    return command
 
 
 @dataclass
@@ -152,20 +176,20 @@ class SettingsManager:
         if exe is None:
             raise RuntimeError("Could not find FFXiPadConfig.exe in the game install.")
 
-        try:
-            # Only chmod the bundled umu-run when running from source.
-            # Inside Flatpak /app is read-only.
-            if UMU_RUN.exists() and not str(UMU_RUN).startswith("/app/"):
-                UMU_RUN.chmod(UMU_RUN.stat().st_mode | 0o111)
-        except Exception:
-            pass
+        ensure_umu_run_available()
 
         env = dict(**__import__("os").environ)
         env["WINEPREFIX"] = str(PREFIX_DIR)
-        env["PROTONPATH"] = str(PROTON_DIR / "GE-Proton7-42")
+        env["PROTONPATH"] = str(PROTON_INSTALL_ROOT / GE_PROTON_VERSION)
         env["WINEDLLOVERRIDES"] = "d3d8=n,b"
 
-        subprocess.Popen([str(UMU_RUN), str(exe)], cwd=str(exe.parent), env=env)
+        command = _umu_command([str(exe)], env=env, cwd=exe.parent)
+
+        subprocess.Popen(
+            command,
+            cwd=str(exe.parent) if not IS_FLATPAK else None,
+            env=env if not IS_FLATPAK else None,
+        )
 
     def _read_ini(self):
         if not self.is_available():

@@ -1,4 +1,5 @@
 import os
+import shutil
 from pathlib import Path
 
 APP_ID = "io.github.mattyws.HorizonXILauncher"
@@ -25,6 +26,18 @@ APP_DOWNLOADS_DIR = DATA_DIR / "Downloads"
 
 # Proton
 GE_PROTON_VERSION = "GE-Proton7-42"
+
+# Proton runner location:
+# - Native/dev keeps the managed Proton install inside launcher data.
+# - Flatpak uses Steam's standard host-visible compatibilitytools.d path.
+#
+# UMU/pressure-vessel expects Steam-runtime-style host paths. Keeping Proton
+# fully inside the Flatpak app-data sandbox can make pressure-vessel fail while
+# creating its nested runtime. The launcher still keeps the Wine prefix and game
+# files in DATA_DIR; only the Proton runner is placed in the common host path.
+STEAM_COMPATTOOLS_DIR = Path.home() / ".local" / "share" / "Steam" / "compatibilitytools.d"
+PROTON_INSTALL_ROOT = STEAM_COMPATTOOLS_DIR if IS_FLATPAK else PROTON_DIR
+
 GE_PROTON_ARCHIVE = f"{GE_PROTON_VERSION}.tar.gz"
 GE_PROTON_URL = (
     "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/"
@@ -47,9 +60,42 @@ HORIZON_LAUNCHER_EXE = (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-# Inside Flatpak these helpers are installed to /app/bin.
-UMU_RUN = Path("/app/bin/umu-run") if IS_FLATPAK else PROJECT_ROOT / "bin" / "umu-run"
+# UMU launcher:
+# - Native/dev uses the project copy.
+# - Flatpak copies the bundled /app/bin/umu-run to ~/.local/bin/umu-run and runs
+#   the writable host-visible copy. This avoids trying to execute/modify UMU
+#   from the immutable /app tree and better matches a normal host UMU install.
+BUNDLED_UMU_RUN = Path("/app/bin/umu-run")
+HOST_LOCAL_BIN = Path.home() / ".local" / "bin"
+HOST_UMU_RUN = HOST_LOCAL_BIN / "umu-run"
+UMU_RUN = HOST_UMU_RUN if IS_FLATPAK else PROJECT_ROOT / "bin" / "umu-run"
+
 ARIA2C = Path("/app/bin/aria2c") if IS_FLATPAK else Path(os.environ.get("ARIA2C", "aria2c"))
+
+
+def ensure_umu_run_available() -> Path:
+    """Ensure the configured umu-run path exists and is executable.
+
+    In Flatpak, /app is read-only at runtime, so we never chmod or modify
+    /app/bin/umu-run directly. Instead, we copy it once to ~/.local/bin/umu-run
+    and use that host-visible copy for all launches.
+    """
+    if IS_FLATPAK:
+        HOST_LOCAL_BIN.mkdir(parents=True, exist_ok=True)
+
+        if not UMU_RUN.exists():
+            if not BUNDLED_UMU_RUN.exists():
+                raise FileNotFoundError(f"Bundled umu-run not found: {BUNDLED_UMU_RUN}")
+            shutil.copy2(BUNDLED_UMU_RUN, UMU_RUN)
+
+        UMU_RUN.chmod(UMU_RUN.stat().st_mode | 0o111)
+        return UMU_RUN
+
+    if UMU_RUN.exists():
+        UMU_RUN.chmod(UMU_RUN.stat().st_mode | 0o111)
+
+    return UMU_RUN
+
 
 # HorizonXI game install
 HORIZON_INSTALL_DIR = PREFIX_DIR / "drive_c" / "Program Files" / "HorizonXI"

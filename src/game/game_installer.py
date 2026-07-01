@@ -7,11 +7,35 @@ import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from config import ASHITA_BOOT_CONFIG, ASHITA_CLI_EXE, DOWNLOADS_DIR, GAME_DIR, PREFIX_DIR, UMU_RUN
+from config import ASHITA_BOOT_CONFIG, ASHITA_CLI_EXE, DOWNLOADS_DIR, GAME_DIR, PREFIX_DIR, UMU_RUN, IS_FLATPAK, ensure_umu_run_available
 from game.manifest import INSTALL_GAME_URL, LATEST_VERSION_URL, PREREQS_ARCHIVE, UPDATE_GAME_URL
 from game.torrent_downloader import TorrentDownloader
 from addons.addon_manager import AddonManager
 from addons.plugin_manager import PluginManager
+
+
+def _umu_command(args, env=None, cwd=None):
+    """Build a UMU command.
+
+    In Flatpak, run UMU on the host with flatpak-spawn so Proton can use the
+    host Mesa/GL stack instead of being trapped inside the launcher sandbox.
+    """
+    args = [str(arg) for arg in args]
+
+    if not IS_FLATPAK:
+        return [str(UMU_RUN), *args]
+
+    command = ["flatpak-spawn", "--host"]
+
+    if cwd is not None:
+        command.append(f"--directory={cwd}")
+
+    for key in ("WINEPREFIX", "PROTONPATH", "WINEDLLOVERRIDES"):
+        if env and key in env:
+            command.append(f"--env={key}={env[key]}")
+
+    command.extend([str(UMU_RUN), *args])
+    return command
 
 
 class GameInstallManager:
@@ -286,6 +310,7 @@ class GameInstallManager:
 
     def run_post_install_helpers(self, proton_path: str, progress_callback=None):
         """Apply required Wine-prefix setup after the game files are present."""
+        ensure_umu_run_available()
         env = self._build_wine_env(proton_path)
 
         steps = [
@@ -318,10 +343,16 @@ class GameInstallManager:
         if not registry_exe.exists():
             return
 
-        subprocess.run(
-            [str(UMU_RUN), "./DONTTOUCH_Registry.exe", "/S"],
-            cwd=str(self.game_dir),
+        command = _umu_command(
+            ["./DONTTOUCH_Registry.exe", "/S"],
             env=env,
+            cwd=self.game_dir,
+        )
+
+        subprocess.run(
+            command,
+            cwd=str(self.game_dir) if not IS_FLATPAK else None,
+            env=env if not IS_FLATPAK else None,
             check=False,
         )
 
@@ -335,13 +366,16 @@ class GameInstallManager:
         if not vc_redist.exists():
             raise RuntimeError(f"Required VC++ redistributable not found: {vc_redist}")
 
-        command = [
-            str(UMU_RUN),
-            str(vc_redist),
-            "/install",
-            "/quiet",
-            "/norestart",
-        ]
+        command = _umu_command(
+            [
+                str(vc_redist),
+                "/install",
+                "/quiet",
+                "/norestart",
+            ],
+            env=env,
+            cwd=self.game_dir,
+        )
 
         print()
         print("================================================")
@@ -353,8 +387,8 @@ class GameInstallManager:
 
         result = subprocess.run(
             command,
-            cwd=str(self.game_dir),
-            env=env,
+            cwd=str(self.game_dir) if not IS_FLATPAK else None,
+            env=env if not IS_FLATPAK else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

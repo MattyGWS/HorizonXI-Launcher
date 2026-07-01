@@ -3,7 +3,7 @@ import shutil
 import urllib.request
 from pathlib import Path
 
-from config import ARIA2C, DATA_DIR, PROJECT_ROOT, UMU_RUN
+from config import ARIA2C, BUNDLED_UMU_RUN, DATA_DIR, IS_FLATPAK, PROJECT_ROOT, PROTON_INSTALL_ROOT, UMU_RUN, ensure_umu_run_available
 
 
 def _exists_command(path_or_command) -> bool:
@@ -21,6 +21,8 @@ def print_startup_diagnostics():
     print(f"[diag] System  {platform.system()} {platform.release()} ({platform.machine()})")
     print(f"[diag] Project {PROJECT_ROOT}")
     print(f"[diag] Data    {DATA_DIR}")
+    print(f"[diag] Flatpak {IS_FLATPAK}")
+    print(f"[diag] Proton  {PROTON_INSTALL_ROOT}")
 
     try:
         import gi  # noqa: F401
@@ -48,10 +50,17 @@ def print_startup_diagnostics():
     except Exception as error:
         print(f"[diag] INFO    libtorrent fallback unavailable: {error}")
 
-    if UMU_RUN.exists():
-        print(f"[diag] OK      umu-run exists: {UMU_RUN}")
-    else:
-        print(f"[diag] MISSING umu-run missing: {UMU_RUN}")
+    if IS_FLATPAK:
+        print(f"[diag] Bundled umu-run {BUNDLED_UMU_RUN}")
+
+    try:
+        ensure_umu_run_available()
+        if UMU_RUN.exists():
+            print(f"[diag] OK      umu-run ready: {UMU_RUN}")
+        else:
+            print(f"[diag] MISSING umu-run missing: {UMU_RUN}")
+    except Exception as error:
+        print(f"[diag] ERROR   umu-run setup failed: {error}")
 
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)

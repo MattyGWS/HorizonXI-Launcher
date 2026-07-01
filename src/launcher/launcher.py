@@ -8,9 +8,35 @@ from config import (
     ASHITA_CLI_EXE,
     ASHITA_BOOT_CONFIG,
     HORIZON_SERVER,
+    IS_FLATPAK,
+    ensure_umu_run_available,
 )
 from launcher.horizon_manager import HorizonManager
 from proton.proton_manager import ProtonManager
+
+
+def _umu_command(args, env=None, cwd=None):
+    """Build a UMU command.
+
+    In Flatpak, run UMU on the host with flatpak-spawn so Proton can use the
+    host Mesa/GL stack instead of being trapped inside the launcher sandbox.
+    """
+    args = [str(arg) for arg in args]
+
+    if not IS_FLATPAK:
+        return [str(UMU_RUN), *args]
+
+    command = ["flatpak-spawn", "--host"]
+
+    if cwd is not None:
+        command.append(f"--directory={cwd}")
+
+    for key in ("WINEPREFIX", "PROTONPATH", "WINEDLLOVERRIDES"):
+        if env and key in env:
+            command.append(f"--env={key}={env[key]}")
+
+    command.extend([str(UMU_RUN), *args])
+    return command
 
 
 class Launcher:
@@ -29,9 +55,15 @@ class Launcher:
 
         self.prefix_dir.mkdir(parents=True, exist_ok=True)
 
+        env = self._build_env()
+        command = _umu_command(
+            [self.horizon.get_launcher_path()],
+            env=env,
+        )
+
         subprocess.Popen(
-            [str(UMU_RUN), self.horizon.get_launcher_path()],
-            env=self._build_env(),
+            command,
+            env=env if not IS_FLATPAK else None,
         )
 
     def launch_game_direct(self, username: str, password: str):
@@ -45,6 +77,11 @@ class Launcher:
         self._update_ashita_boot_command(username, password)
 
         env = self._build_env()
+        command = _umu_command(
+            ["./Ashita-cli.exe", "ashita.ini"],
+            env=env,
+            cwd=GAME_DIR,
+        )
 
         print()
         print("========================================")
@@ -56,22 +93,18 @@ class Launcher:
         print("Edited config     :", ASHITA_BOOT_CONFIG)
         print("WINEPREFIX        :", env["WINEPREFIX"])
         print("PROTONPATH        :", env["PROTONPATH"])
+        print("Command           :", " ".join(command))
         print("========================================")
         print()
 
         subprocess.Popen(
-            [
-                str(UMU_RUN),
-                "./Ashita-cli.exe",
-                "ashita.ini",
-            ],
-            cwd=str(GAME_DIR),
-            env=env,
+            command,
+            cwd=str(GAME_DIR) if not IS_FLATPAK else None,
+            env=env if not IS_FLATPAK else None,
         )
 
     def _ensure_umu_executable(self):
-        if UMU_RUN.exists():
-            UMU_RUN.chmod(UMU_RUN.stat().st_mode | 0o111)
+        ensure_umu_run_available()
 
     def _build_env(self):
         env = os.environ.copy()

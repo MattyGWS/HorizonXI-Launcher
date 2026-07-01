@@ -8,7 +8,7 @@ from config import (
     GE_PROTON_ARCHIVE,
     GE_PROTON_URL,
     GE_PROTON_VERSION,
-    PROTON_DIR,
+    PROTON_INSTALL_ROOT,
 )
 
 
@@ -16,7 +16,7 @@ class ProtonManager:
     VERSION = GE_PROTON_VERSION
 
     def __init__(self):
-        self.proton_dir = PROTON_DIR
+        self.proton_dir = PROTON_INSTALL_ROOT
         self.downloads_dir = APP_DOWNLOADS_DIR
         self.archive_path = self.downloads_dir / GE_PROTON_ARCHIVE
         self.proton_path = self.proton_dir / self.VERSION
