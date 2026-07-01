@@ -1,6 +1,8 @@
+import html
 import json
 import threading
 import urllib.request
+import urllib.parse
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -24,7 +26,18 @@ from proton.proton_manager import ProtonManager
 
 
 HORIZON_STATUS_URL = "https://api.horizonxi.com/api/v1/misc/status"
+HORIZON_YELLS_URL = "https://api.horizonxi.com/api/v1/misc/yells"
+HORIZON_NEWS_URL = "https://horizonxi.com/news.json"
+HORIZON_CHARS_URL = "https://api.horizonxi.com/api/v1/chars"
+HORIZON_CHAR_URL = "https://api.horizonxi.com/api/v1/chars/{name}"
+HORIZON_BAZAAR_URL = "https://api.horizonxi.com/api/v1/items/bazaar"
+
+YELLS_REFRESH_SECONDS = 15
+NEWS_REFRESH_SECONDS = 1800
+FRIENDS_REFRESH_SECONDS = 60
+
 CREDENTIALS_FILE = DATA_DIR / "credentials.json"
+FRIENDS_FILE = DATA_DIR / "friends.json"
 
 MAIN_ACTION_INSTALL = "install"
 MAIN_ACTION_MAINTENANCE = "maintenance"
@@ -64,6 +77,9 @@ class HorizonWindow(Adw.Application):
         self.launch_button = None
         self.launch_game_button = None
         self.reset_button = None
+        self.gamepad_button = None
+        self.backup_macros_button = None
+        self.open_folder_button = None
 
         self.username_entry = None
         self.password_entry = None
@@ -73,6 +89,16 @@ class HorizonWindow(Adw.Application):
         self.plugins_rows_box = None
         self.polplugins_rows_box = None
         self.extensions_refresh_button = None
+
+        self.yells_rows_box = None
+        self.yells_status_label = None
+        self.news_rows_box = None
+        self.news_status_label = None
+        self.friends_rows_box = None
+        self.friends_status_label = None
+        self.friend_names = []
+        self.characters_cache = []
+        self.characters_by_name = {}
 
         self.server_online = False
         self.players_online = None
@@ -116,25 +142,90 @@ class HorizonWindow(Adw.Application):
 
         stack.add_titled(self.build_main_page(), "main", "Main")
         stack.add_titled(self.build_addons_page(), "addons", "Addons")
+        stack.add_titled(self.build_community_page(), "community", "Community")
         stack.add_titled(self.build_settings_page(), "settings", "Settings")
 
         root_box.append(stack)
 
-        version_label = Gtk.Label(label="Version 0.2.0")
+        version_label = Gtk.Label(label="Version 0.3.0")
         version_label.add_css_class("dim-label")
         version_label.set_margin_top(2)
         root_box.append(version_label)
 
         toolbar_view.set_content(root_box)
         self.window.set_content(toolbar_view)
+        self.load_custom_css()
 
         self.load_saved_credentials()
+        self.load_friends()
         self.refresh_status()
         self.refresh_server_status_async()
+        self.refresh_yells_async()
+        self.refresh_news_async()
+        self.refresh_friends_async()
 
         GLib.timeout_add_seconds(60, self.refresh_server_status_async)
+        GLib.timeout_add_seconds(YELLS_REFRESH_SECONDS, self.refresh_yells_async)
+        GLib.timeout_add_seconds(NEWS_REFRESH_SECONDS, self.refresh_news_async)
+        GLib.timeout_add_seconds(FRIENDS_REFRESH_SECONDS, self.refresh_friends_async)
 
         self.window.present()
+
+    def load_custom_css(self):
+        css = b"""
+        .yells-panel {
+            background: rgba(28, 39, 62, 0.62);
+            border-radius: 10px;
+            padding: 6px;
+        }
+
+        .yell-row {
+            padding: 6px 8px;
+        }
+
+        .yell-separator {
+            background: rgba(118, 132, 160, 0.18);
+            margin-left: 6px;
+            margin-right: 6px;
+            min-height: 1px;
+        }
+
+        .friends-panel {
+            background: rgba(54, 54, 58, 0.72);
+            border-radius: 10px;
+            padding: 6px;
+        }
+
+        .friend-row {
+            padding: 8px 8px;
+        }
+
+        .friend-separator {
+            background: rgba(150, 150, 160, 0.16);
+            margin-left: 6px;
+            margin-right: 6px;
+            min-height: 1px;
+        }
+
+        .friend-remove-button {
+            padding-left: 10px;
+            padding-right: 10px;
+            min-height: 28px;
+        }
+        """
+
+        try:
+            provider = Gtk.CssProvider()
+            provider.load_from_data(css)
+            display = Gdk.Display.get_default()
+            if display:
+                Gtk.StyleContext.add_provider_for_display(
+                    display,
+                    provider,
+                    Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+                )
+        except Exception as error:
+            print(f"Failed to load custom CSS: {error}")
 
     def build_main_page(self):
         main_box = Gtk.Box(
@@ -175,40 +266,40 @@ class HorizonWindow(Adw.Application):
         left_box.append(status_group)
 
 
-        login_group = Adw.PreferencesGroup(title="Direct Game Launch")
+        self.login_group = Adw.PreferencesGroup(title="Create an account on the HorizonXI Website")
 
         self.username_entry = Adw.EntryRow(title="Username")
         self.username_entry.connect("changed", self.on_credentials_changed)
-        login_group.add(self.username_entry)
+        self.login_group.add(self.username_entry)
 
         self.password_entry = Adw.PasswordEntryRow(title="Password")
         self.password_entry.connect("changed", self.on_credentials_changed)
-        login_group.add(self.password_entry)
+        self.login_group.add(self.password_entry)
 
         self.remember_check = Gtk.CheckButton(label="Remember credentials")
         self.remember_check.set_margin_top(8)
         self.remember_check.set_margin_bottom(8)
         self.remember_check.connect("toggled", self.on_remember_toggled)
-        login_group.add(self.remember_check)
+        self.login_group.add(self.remember_check)
 
         self.launch_game_button = Gtk.Button(label="Install Game")
         self.launch_game_button.add_css_class("suggested-action")
         self.launch_game_button.connect("clicked", self.on_main_action_clicked)
-        login_group.add(self.launch_game_button)
+        self.login_group.add(self.launch_game_button)
 
         self.progress_bar = Gtk.ProgressBar()
         self.progress_bar.set_show_text(True)
         self.progress_bar.set_text("Idle")
         self.progress_bar.set_fraction(0.0)
-        login_group.add(self.progress_bar)
+        self.login_group.add(self.progress_bar)
 
         self.status_label = Gtk.Label(label="Ready")
         self.status_label.set_wrap(True)
         self.status_label.set_xalign(0)
         self.status_label.add_css_class("dim-label")
-        login_group.add(self.status_label)
+        self.login_group.add(self.status_label)
 
-        right_box.append(login_group)
+        right_box.append(self.login_group)
 
         main_box.append(content_box)
 
@@ -232,6 +323,668 @@ class HorizonWindow(Adw.Application):
         main_box.append(links_group)
 
         return main_box
+
+
+    def build_community_page(self):
+        page = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=18,
+            homogeneous=True,
+        )
+        page.set_vexpand(True)
+
+        yells_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        news_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        friends_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        page.append(yells_box)
+        page.append(news_box)
+        page.append(friends_box)
+
+        yells_title = self._make_centered_section_title("Live Yells / Shouts")
+        yells_box.append(yells_title)
+
+        yells_group = Adw.PreferencesGroup(
+            description="Recent in-game yells from HorizonXI. Refreshes frequently.",
+        )
+
+        self.yells_status_label = Gtk.Label(label="Loading yells...")
+        self.yells_status_label.add_css_class("dim-label")
+        self.yells_status_label.set_xalign(0)
+        self.yells_status_label.set_margin_bottom(6)
+        yells_group.add(self.yells_status_label)
+
+        yells_scrolled = Gtk.ScrolledWindow()
+        yells_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        yells_scrolled.set_min_content_height(360)
+        yells_scrolled.set_vexpand(True)
+
+        self.yells_rows_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.yells_rows_box.add_css_class("yells-panel")
+        self.yells_rows_box.set_margin_top(6)
+        self.yells_rows_box.set_margin_bottom(6)
+        self.yells_rows_box.set_margin_start(6)
+        self.yells_rows_box.set_margin_end(6)
+        yells_scrolled.set_child(self.yells_rows_box)
+
+        yells_group.add(yells_scrolled)
+        yells_box.append(yells_group)
+
+        news_title = self._make_centered_section_title("HorizonXI News")
+        news_box.append(news_title)
+
+        news_group = Adw.PreferencesGroup(
+            description="Latest articles from HorizonXI. Click an article to open it in your browser.",
+        )
+
+        self.news_status_label = Gtk.Label(label="Loading news...")
+        self.news_status_label.add_css_class("dim-label")
+        self.news_status_label.set_xalign(0)
+        self.news_status_label.set_margin_bottom(6)
+        news_group.add(self.news_status_label)
+
+        news_scrolled = Gtk.ScrolledWindow()
+        news_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        news_scrolled.set_min_content_height(360)
+        news_scrolled.set_vexpand(True)
+
+        self.news_rows_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.news_rows_box.set_margin_top(6)
+        self.news_rows_box.set_margin_bottom(6)
+        self.news_rows_box.set_margin_start(6)
+        self.news_rows_box.set_margin_end(6)
+        news_scrolled.set_child(self.news_rows_box)
+
+        news_group.add(news_scrolled)
+        news_box.append(news_group)
+
+        friends_title = self._make_centered_section_title("Friends")
+        friends_box.append(friends_title)
+
+        friends_group = Adw.PreferencesGroup(
+            description="Follow characters by name. This list is local to your launcher.",
+        )
+
+        add_friend_button = Gtk.Button(label="Add Friend")
+        add_friend_button.add_css_class("suggested-action")
+        add_friend_button.connect("clicked", self.on_add_friend_clicked)
+        friends_group.add(add_friend_button)
+
+        self.friends_status_label = Gtk.Label(label="Loading friends...")
+        self.friends_status_label.add_css_class("dim-label")
+        self.friends_status_label.set_xalign(0)
+        self.friends_status_label.set_margin_top(6)
+        self.friends_status_label.set_margin_bottom(6)
+        friends_group.add(self.friends_status_label)
+
+        friends_scrolled = Gtk.ScrolledWindow()
+        friends_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        friends_scrolled.set_min_content_height(360)
+        friends_scrolled.set_vexpand(True)
+
+        self.friends_rows_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.friends_rows_box.add_css_class("friends-panel")
+        self.friends_rows_box.set_margin_top(6)
+        self.friends_rows_box.set_margin_bottom(6)
+        self.friends_rows_box.set_margin_start(6)
+        self.friends_rows_box.set_margin_end(6)
+        friends_scrolled.set_child(self.friends_rows_box)
+
+        friends_group.add(friends_scrolled)
+        friends_box.append(friends_group)
+
+        GLib.idle_add(self.render_friends)
+        return page
+
+    def refresh_yells_async(self):
+        thread = threading.Thread(target=self.fetch_yells, daemon=True)
+        thread.start()
+        return True
+
+    def refresh_news_async(self):
+        thread = threading.Thread(target=self.fetch_news, daemon=True)
+        thread.start()
+        return True
+
+    def fetch_json_url(self, url, timeout=10):
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "HorizonXI-Linux-Launcher/0.2"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def fetch_yells(self):
+        try:
+            payload = self.fetch_json_url(HORIZON_YELLS_URL, timeout=10)
+            GLib.idle_add(self.apply_yells, payload)
+        except Exception as error:
+            GLib.idle_add(self.apply_yells_error, str(error))
+
+    def fetch_news(self):
+        try:
+            payload = self.fetch_json_url(HORIZON_NEWS_URL, timeout=10)
+            GLib.idle_add(self.apply_news, payload)
+        except Exception as error:
+            GLib.idle_add(self.apply_news_error, str(error))
+
+    def clear_box_children(self, box):
+        if not box:
+            return
+
+        child = box.get_first_child()
+        while child is not None:
+            next_child = child.get_next_sibling()
+            box.remove(child)
+            child = next_child
+
+    def apply_yells(self, payload):
+        if not self.yells_rows_box:
+            return False
+
+        self.clear_box_children(self.yells_rows_box)
+
+        if not isinstance(payload, list):
+            self.apply_yells_error("Unexpected yells response.")
+            return False
+
+        yells = payload[:40]
+
+        if self.yells_status_label:
+            self.yells_status_label.set_text(f"Showing latest {len(yells)} yells.")
+
+        for index, yell in enumerate(yells):
+            row = self.create_yell_row(yell)
+            self.yells_rows_box.append(row)
+
+            if index < len(yells) - 1:
+                separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+                separator.add_css_class("yell-separator")
+                self.yells_rows_box.append(separator)
+
+        return False
+
+    def apply_yells_error(self, error_message):
+        if self.yells_status_label:
+            self.yells_status_label.set_text(f"Could not load yells: {error_message}")
+
+        if self.yells_rows_box:
+            self.clear_box_children(self.yells_rows_box)
+
+        return False
+
+    def create_yell_row(self, yell):
+        speaker = "Unknown"
+        message = ""
+        date_value = None
+
+        if isinstance(yell, dict):
+            speaker = str(yell.get("speaker", yell.get("name", "Unknown")))
+            message = str(yell.get("message", yell.get("text", "")))
+            date_value = yell.get("date", yell.get("time", None))
+        else:
+            message = str(yell)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        row.add_css_class("yell-row")
+        row.set_margin_top(0)
+        row.set_margin_bottom(0)
+        row.set_margin_start(0)
+        row.set_margin_end(0)
+
+        time_text = html.escape(self.format_api_time(date_value))
+        speaker_text = html.escape(speaker)
+        message_text = html.escape(message)
+
+        line = Gtk.Label()
+        line.set_markup(
+            f'<span foreground="#cbd5e1">[{time_text}] </span>'
+            f'<span foreground="#e58da0"><b>{speaker_text}:</b></span> '
+            f'<span foreground="#f0c6d0">{message_text}</span>'
+        )
+        line.set_xalign(0)
+        line.set_wrap(True)
+        line.set_selectable(True)
+        row.append(line)
+
+        return row
+
+    def apply_news(self, payload):
+        if not self.news_rows_box:
+            return False
+
+        self.clear_box_children(self.news_rows_box)
+
+        if not isinstance(payload, list):
+            self.apply_news_error("Unexpected news response.")
+            return False
+
+        articles = payload[:12]
+
+        if self.news_status_label:
+            self.news_status_label.set_text(f"Showing latest {len(articles)} articles.")
+
+        for article in articles:
+            row = self.create_news_row(article)
+            self.news_rows_box.append(row)
+
+        return False
+
+    def apply_news_error(self, error_message):
+        if self.news_status_label:
+            self.news_status_label.set_text(f"Could not load news: {error_message}")
+
+        if self.news_rows_box:
+            self.clear_box_children(self.news_rows_box)
+
+        return False
+
+    def create_news_row(self, article):
+        title = "Untitled"
+        excerpt = ""
+        print_date = ""
+        reading_time = ""
+        slug = None
+
+        if isinstance(article, dict):
+            title = str(article.get("title", "Untitled"))
+            excerpt = str(article.get("excerpt", ""))
+            print_date = str(article.get("printDate", ""))
+            reading_time = str(article.get("printReadingTime", article.get("readingTime", "")))
+            slug = article.get("slug", None)
+            if not print_date:
+                print_date = self.format_news_date(article.get("date", None))
+        else:
+            title = str(article)
+
+        url = "https://horizonxi.com/news"
+        if slug:
+            url = f"https://horizonxi.com/news/{slug}"
+
+        button = Gtk.Button()
+        button.set_halign(Gtk.Align.FILL)
+        button.connect("clicked", self.on_open_link_clicked, url)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
+        box.set_margin_start(10)
+        box.set_margin_end(10)
+
+        title_label = Gtk.Label(label=title)
+        title_label.add_css_class("heading")
+        title_label.set_xalign(0)
+        title_label.set_wrap(True)
+        box.append(title_label)
+
+        meta_parts = [part for part in (print_date, reading_time) if part]
+        if meta_parts:
+            meta = Gtk.Label(label="  •  ".join(meta_parts))
+            meta.add_css_class("dim-label")
+            meta.set_xalign(0)
+            meta.set_wrap(True)
+            box.append(meta)
+
+        if excerpt:
+            excerpt_label = Gtk.Label(label=excerpt)
+            excerpt_label.set_xalign(0)
+            excerpt_label.set_wrap(True)
+            box.append(excerpt_label)
+
+        button.set_child(box)
+        return button
+
+    def format_api_time(self, value):
+        if value is None:
+            return "Unknown time"
+
+        try:
+            timestamp = float(value)
+            if timestamp > 100000000000:
+                timestamp = timestamp / 1000.0
+            dt = datetime.fromtimestamp(timestamp)
+            return dt.strftime("%H:%M")
+        except Exception:
+            return str(value)
+
+    def format_news_date(self, value):
+        if not value:
+            return ""
+
+        try:
+            clean_value = str(value).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(clean_value)
+            return dt.strftime("%B %-d, %Y")
+        except Exception:
+            try:
+                return datetime.fromisoformat(str(value).split("T")[0]).strftime("%B %-d, %Y")
+            except Exception:
+                return str(value)
+
+    def load_friends(self):
+        self.friend_names = []
+        try:
+            if FRIENDS_FILE.exists():
+                data = json.loads(FRIENDS_FILE.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    self.friend_names = [str(name).strip() for name in data if str(name).strip()]
+        except Exception as error:
+            print(f"Failed to load friends: {error}")
+            self.friend_names = []
+
+    def save_friends(self):
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            FRIENDS_FILE.write_text(json.dumps(self.friend_names, indent=2) + "\n", encoding="utf-8")
+        except Exception as error:
+            print(f"Failed to save friends: {error}")
+
+    def refresh_friends_async(self):
+        thread = threading.Thread(target=self.fetch_friends_data, daemon=True)
+        thread.start()
+        return True
+
+    def fetch_friends_data(self):
+        try:
+            characters = []
+
+            # /api/v1/chars only appears to contain online characters, so it is not
+            # reliable for validating or refreshing offline friends. Fetch each
+            # followed character directly instead.
+            for friend_name in list(self.friend_names):
+                character = self.fetch_character_by_name(friend_name)
+                if character:
+                    characters.append(character)
+
+            GLib.idle_add(self.apply_friends_data, characters)
+        except Exception as error:
+            GLib.idle_add(self.apply_friends_error, str(error))
+
+    def fetch_character_by_name(self, name, timeout=10):
+        safe_name = urllib.parse.quote(str(name).strip())
+        if not safe_name:
+            return None
+
+        payload = self.fetch_json_url(HORIZON_CHAR_URL.format(name=safe_name), timeout=timeout)
+        return self.normalize_single_character_payload(payload)
+
+    def normalize_single_character_payload(self, payload):
+        if isinstance(payload, dict):
+            # Direct character endpoint: usually the character object itself.
+            if self.get_character_name(payload):
+                return payload
+
+            # Be tolerant of wrappers such as {"data": {...}} or {"character": {...}}.
+            for key in ("char", "character", "player", "data", "result"):
+                value = payload.get(key)
+                if isinstance(value, dict) and self.get_character_name(value):
+                    return value
+
+        if isinstance(payload, list) and payload:
+            for item in payload:
+                if isinstance(item, dict) and self.get_character_name(item):
+                    return item
+
+        return None
+
+    def normalize_characters_payload(self, payload):
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+
+        if isinstance(payload, dict):
+            for key in ("chars", "characters", "players", "data", "results"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+
+            values = list(payload.values())
+            if values and all(isinstance(item, dict) for item in values):
+                return values
+
+        return []
+
+    def apply_friends_data(self, characters):
+        self.characters_cache = characters
+        self.characters_by_name = {}
+
+        for character in characters:
+            name = self.get_character_name(character)
+            if name:
+                self.characters_by_name[name.lower()] = character
+
+        self.render_friends()
+        return False
+
+    def apply_friends_error(self, error_message):
+        if self.friends_status_label:
+            self.friends_status_label.set_text(f"Could not refresh friends: {error_message}")
+        self.render_friends()
+        return False
+
+    def render_friends(self):
+        if not self.friends_rows_box:
+            return False
+
+        self.clear_box_children(self.friends_rows_box)
+
+        if not self.friend_names:
+            if self.friends_status_label:
+                self.friends_status_label.set_text("No friends added yet.")
+
+            empty_label = Gtk.Label(label="Add a character to follow their online status and job.")
+            empty_label.add_css_class("dim-label")
+            empty_label.set_wrap(True)
+            empty_label.set_xalign(0)
+            self.friends_rows_box.append(empty_label)
+            return False
+
+        friend_entries = []
+        online_count = 0
+
+        for friend_name in self.friend_names:
+            character = self.characters_by_name.get(friend_name.lower())
+            is_online = bool(character and self.get_character_online(character))
+
+            if is_online:
+                online_count += 1
+
+            display_name = friend_name
+            if character:
+                display_name = self.get_character_name(character) or friend_name
+
+            friend_entries.append((friend_name, character, display_name, is_online))
+
+        friend_entries.sort(
+            key=lambda entry: (
+                0 if entry[3] else 1,
+                entry[2].lower(),
+            )
+        )
+
+        for index, (friend_name, character, _display_name, _is_online) in enumerate(friend_entries):
+            self.friends_rows_box.append(self.create_friend_row(friend_name, character))
+
+            if index < len(friend_entries) - 1:
+                separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+                separator.add_css_class("friend-separator")
+                self.friends_rows_box.append(separator)
+
+        if self.friends_status_label:
+            self.friends_status_label.set_text(f"{online_count}/{len(self.friend_names)} friends online.")
+
+        return False
+
+    def create_friend_row(self, friend_name, character):
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        row.add_css_class("friend-row")
+        row.set_margin_top(0)
+        row.set_margin_bottom(0)
+        row.set_margin_start(0)
+        row.set_margin_end(0)
+
+        info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        info_box.set_hexpand(True)
+        info_box.set_valign(Gtk.Align.CENTER)
+
+        display_name = friend_name
+        online = False
+        job_string = "Unknown job"
+
+        if character:
+            display_name = self.get_character_name(character) or friend_name
+            online = self.get_character_online(character)
+            job_string = self.get_character_jobstring(character)
+        elif self.characters_by_name:
+            job_string = "Character not found"
+
+        status_dot = "🟢" if online else "⚫"
+        status_word = "Online" if online else "Offline"
+
+        name_label = Gtk.Label()
+        name_label.set_markup(f"<b>{html.escape(display_name)}</b>")
+        name_label.set_xalign(0)
+        name_label.set_wrap(True)
+        info_box.append(name_label)
+
+        detail_label = Gtk.Label(label=f"{status_dot} {status_word} • {job_string}")
+        detail_label.add_css_class("dim-label")
+        detail_label.set_xalign(0)
+        detail_label.set_wrap(True)
+        info_box.append(detail_label)
+
+        remove_button = Gtk.Button(label="Remove")
+        remove_button.add_css_class("flat")
+        remove_button.add_css_class("friend-remove-button")
+        remove_button.set_valign(Gtk.Align.CENTER)
+        remove_button.connect("clicked", self.on_remove_friend_clicked, friend_name)
+
+        row.append(info_box)
+        row.append(remove_button)
+        return row
+
+    def get_character_name(self, character):
+        for key in ("charname", "name", "character", "player", "playerName"):
+            value = character.get(key)
+            if value:
+                return str(value)
+        return ""
+
+    def get_character_online(self, character):
+        for key in ("isOnline", "online", "is_online"):
+            if key in character:
+                value = character.get(key)
+                if isinstance(value, str):
+                    return value.lower() in ("true", "1", "yes", "online")
+                return bool(value)
+
+        status = str(character.get("status", "")).lower()
+        return status == "online"
+
+    def get_character_jobstring(self, character):
+        for key in ("jobString", "jobstring", "job_string", "jobs", "job"):
+            value = character.get(key)
+            if value not in (None, ""):
+                return str(value)
+
+        main_job = character.get("mainJob", character.get("main_job", character.get("jobName", character.get("mjob"))))
+        main_level = character.get("mainLevel", character.get("main_level", character.get("jobLevel", character.get("mlvl"))))
+        sub_job = character.get("subJob", character.get("sub_job", character.get("subJobName", character.get("sjob"))))
+        sub_level = character.get("subLevel", character.get("sub_level", character.get("subJobLevel", character.get("slvl"))))
+
+        if main_job and main_level and sub_job and sub_level:
+            return f"{main_job} {main_level}/{sub_job} {sub_level}"
+
+        if main_job and main_level:
+            return f"{main_job} {main_level}"
+
+        return "Unknown job"
+
+    def get_character_location(self, character):
+        for key in (
+            "zoneName", "zone_name", "currentZone", "current_zone",
+            "location", "area", "zone", "region", "pos_zone",
+        ):
+            value = character.get(key)
+            if value not in (None, ""):
+                if isinstance(value, int):
+                    return f"Zone {value}"
+                return str(value)
+        return "Unknown location"
+
+    def on_add_friend_clicked(self, button):
+        dialog = Adw.MessageDialog(
+            transient_for=self.window,
+            heading="Add Friend",
+            body="Enter a HorizonXI character name to follow.",
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("add", "Add Friend")
+        dialog.set_default_response("add")
+        dialog.set_close_response("cancel")
+
+        entry = Gtk.Entry()
+        entry.set_placeholder_text("Character name")
+        entry.set_activates_default(True)
+        entry.set_margin_top(8)
+        dialog.set_extra_child(entry)
+        dialog.connect("response", self.on_add_friend_response, entry)
+        dialog.present()
+        entry.grab_focus()
+
+    def on_add_friend_response(self, dialog, response, entry):
+        if response != "add":
+            return
+
+        name = entry.get_text().strip()
+        if not name:
+            self.show_friend_message("Enter a character name first.")
+            return
+
+        self.add_friend_by_name(name)
+
+    def add_friend_by_name(self, name):
+        self.show_friend_message("Checking character...")
+
+        def worker():
+            try:
+                character = self.fetch_character_by_name(name, timeout=10)
+                GLib.idle_add(self.finish_add_friend_by_name, name, character)
+            except Exception:
+                GLib.idle_add(
+                    self.show_friend_message,
+                    f"Character '{name}' does not exist."
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def finish_add_friend_by_name(self, name, character=None):
+        if not character:
+            self.show_friend_message(f"Character '{name}' does not exist.")
+            return False
+
+        canonical_name = self.get_character_name(character) or name
+        if canonical_name.lower() in [existing.lower() for existing in self.friend_names]:
+            self.show_friend_message(f"{canonical_name} is already in your friends list.")
+            return False
+
+        self.friend_names.append(canonical_name)
+        self.friend_names.sort(key=str.lower)
+        self.characters_by_name[canonical_name.lower()] = character
+        self.save_friends()
+        self.show_friend_message(f"Added {canonical_name}.")
+        self.render_friends()
+        return False
+
+    def on_remove_friend_clicked(self, button, friend_name):
+        self.friend_names = [name for name in self.friend_names if name.lower() != friend_name.lower()]
+        self.save_friends()
+        self.show_friend_message(f"Removed {friend_name}.")
+        self.render_friends()
+
+    def show_friend_message(self, message, seconds=3):
+        if self.friends_status_label:
+            self.friends_status_label.set_text(message)
+            GLib.timeout_add_seconds(seconds, self.render_friends)
+        return False
 
     def build_addons_page(self):
         page = Gtk.Box(
@@ -546,6 +1299,29 @@ class HorizonWindow(Adw.Application):
         GLib.idle_add(self.load_settings_ui)
         return outer
 
+    def _make_centered_section_title(self, text):
+        label = Gtk.Label(label=text)
+        label.add_css_class("heading")
+        label.set_halign(Gtk.Align.CENTER)
+        label.set_margin_bottom(8)
+        return label
+
+    def _make_button_stack(self, width=360, spacing=8):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=spacing)
+        box.set_halign(Gtk.Align.CENTER)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
+        return box
+
+    def _add_stacked_button(self, box, label, callback, css_class=None, width=360):
+        button = Gtk.Button(label=label)
+        button.set_size_request(width, -1)
+        if css_class:
+            button.add_css_class(css_class)
+        button.connect("clicked", callback)
+        box.append(button)
+        return button
+
     def build_general_settings_page(self):
         page = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=24, homogeneous=True)
 
@@ -572,9 +1348,13 @@ class HorizonWindow(Adw.Application):
         self._add_resolution_setting(resolution_group, "background", "Background Resolution")
         self._add_resolution_setting(resolution_group, "menu", "Menu Resolution")
 
-        native_resolution_button = Gtk.Button(label="Use Monitor Native Resolution")
-        native_resolution_button.connect("clicked", self.on_use_native_resolution_clicked)
-        resolution_group.add(native_resolution_button)
+        resolution_buttons_box = self._make_button_stack()
+        self._add_stacked_button(
+            resolution_buttons_box,
+            "Use Monitor Native Resolution",
+            self.on_use_native_resolution_clicked,
+        )
+        resolution_group.add(resolution_buttons_box)
 
         right.append(resolution_group)
 
@@ -588,14 +1368,19 @@ class HorizonWindow(Adw.Application):
         right.append(window_group)
 
         actions_group = Adw.PreferencesGroup(title="Settings Actions")
-        save_button = Gtk.Button(label="Save Settings")
-        save_button.add_css_class("suggested-action")
-        save_button.connect("clicked", self.on_save_settings_clicked)
-        actions_group.add(save_button)
-
-        reset_button = Gtk.Button(label="Reset Settings to Default")
-        reset_button.connect("clicked", self.on_reset_settings_clicked)
-        actions_group.add(reset_button)
+        actions_buttons_box = self._make_button_stack()
+        self._add_stacked_button(
+            actions_buttons_box,
+            "Save Settings",
+            self.on_save_settings_clicked,
+            "suggested-action",
+        )
+        self._add_stacked_button(
+            actions_buttons_box,
+            "Reset Settings to Default",
+            self.on_reset_settings_clicked,
+        )
+        actions_group.add(actions_buttons_box)
         right.append(actions_group)
 
         return page
@@ -623,13 +1408,19 @@ class HorizonWindow(Adw.Application):
         right.append(quality_group)
 
         actions_group = Adw.PreferencesGroup(title="Settings Actions")
-        save_button = Gtk.Button(label="Save Settings")
-        save_button.add_css_class("suggested-action")
-        save_button.connect("clicked", self.on_save_settings_clicked)
-        actions_group.add(save_button)
-        reset_button = Gtk.Button(label="Reset Settings to Default")
-        reset_button.connect("clicked", self.on_reset_settings_clicked)
-        actions_group.add(reset_button)
+        actions_buttons_box = self._make_button_stack()
+        self._add_stacked_button(
+            actions_buttons_box,
+            "Save Settings",
+            self.on_save_settings_clicked,
+            "suggested-action",
+        )
+        self._add_stacked_button(
+            actions_buttons_box,
+            "Reset Settings to Default",
+            self.on_reset_settings_clicked,
+        )
+        actions_group.add(actions_buttons_box)
         right.append(actions_group)
 
         return page
@@ -640,37 +1431,52 @@ class HorizonWindow(Adw.Application):
         tools_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         page.append(tools_box)
 
-        tools_group = Adw.PreferencesGroup(title="Tools")
+        tools_box.append(self._make_centered_section_title("Tools"))
+        tools_group = Adw.PreferencesGroup()
 
-        gamepad_button = Gtk.Button(label="Open Gamepad Config")
-        gamepad_button.connect("clicked", self.on_open_gamepad_config_clicked)
-        tools_group.add(gamepad_button)
+        tools_buttons_box = self._make_button_stack()
+
+        self.gamepad_button = Gtk.Button(label="Open Gamepad Config")
+        self.gamepad_button.set_size_request(360, -1)
+        self.gamepad_button.connect("clicked", self.on_open_gamepad_config_clicked)
+        tools_buttons_box.append(self.gamepad_button)
 
         self.launch_button = Gtk.Button(label="Open Official Launcher")
+        self.launch_button.set_size_request(360, -1)
         self.launch_button.connect("clicked", self.on_launch_clicked)
-        tools_group.add(self.launch_button)
+        tools_buttons_box.append(self.launch_button)
 
-        open_folder_button = Gtk.Button(label="Open Game Folder")
-        open_folder_button.connect("clicked", self.on_open_game_folder_clicked)
-        tools_group.add(open_folder_button)
+        self.open_folder_button = Gtk.Button(label="Open Game Folder")
+        self.open_folder_button.set_size_request(360, -1)
+        self.open_folder_button.connect("clicked", self.on_open_game_folder_clicked)
+        tools_buttons_box.append(self.open_folder_button)
 
-        backup_macros_button = Gtk.Button(label="Backup Macros")
-        backup_macros_button.connect("clicked", self.on_backup_macros_clicked)
-        tools_group.add(backup_macros_button)
+        self.backup_macros_button = Gtk.Button(label="Backup Macros")
+        self.backup_macros_button.set_size_request(360, -1)
+        self.backup_macros_button.connect("clicked", self.on_backup_macros_clicked)
+        tools_buttons_box.append(self.backup_macros_button)
 
         self.install_button = Gtk.Button(label="Repair Installation")
+        self.install_button.set_size_request(360, -1)
         self.install_button.add_css_class("suggested-action")
         self.install_button.connect("clicked", self.on_install_clicked)
-        tools_group.add(self.install_button)
+        tools_buttons_box.append(self.install_button)
 
+        tools_group.add(tools_buttons_box)
         tools_box.append(tools_group)
 
-        danger_group = Adw.PreferencesGroup(title="Danger Zone")
+        tools_box.append(self._make_centered_section_title("Danger Zone"))
+        danger_group = Adw.PreferencesGroup()
+
+        danger_box = self._make_button_stack()
 
         self.reset_button = Gtk.Button(label="Nuclear Reset")
+        self.reset_button.set_size_request(360, -1)
         self.reset_button.add_css_class("destructive-action")
         self.reset_button.connect("clicked", self.on_nuclear_reset_clicked)
-        danger_group.add(self.reset_button)
+        danger_box.append(self.reset_button)
+
+        danger_group.add(danger_box)
 
         danger_note = Gtk.Label(
             label=(
@@ -682,6 +1488,7 @@ class HorizonWindow(Adw.Application):
         danger_note.set_wrap(True)
         danger_note.set_xalign(0)
         danger_note.add_css_class("dim-label")
+        danger_note.set_margin_top(4)
         danger_group.add(danger_note)
 
         tools_box.append(danger_group)
@@ -950,10 +1757,19 @@ class HorizonWindow(Adw.Application):
             game_status_text = f"❌ {game_status_text}"
         self.game_status.set_subtitle(game_status_text)
 
+        if self.gamepad_button:
+            self.gamepad_button.set_sensitive(game_installed and not self.operation_in_progress)
+
         if self.launch_button:
             self.launch_button.set_sensitive(
                 proton_installed and official_launcher_installed and not self.operation_in_progress
             )
+
+        if self.open_folder_button:
+            self.open_folder_button.set_sensitive(game_installed and not self.operation_in_progress)
+
+        if self.backup_macros_button:
+            self.backup_macros_button.set_sensitive(game_installed and not self.operation_in_progress)
 
         if self.install_button:
             self.install_button.set_sensitive(not self.operation_in_progress)
@@ -1037,6 +1853,7 @@ class HorizonWindow(Adw.Application):
             print(f"Failed to load saved credentials: {error}")
         finally:
             self.loading_saved_credentials = False
+            self.update_login_group_title()
 
     def save_credentials(self):
         if not self.remember_check or not self.remember_check.get_active():
@@ -1074,13 +1891,7 @@ class HorizonWindow(Adw.Application):
 
     def fetch_server_status(self):
         try:
-            request = urllib.request.Request(
-                HORIZON_STATUS_URL,
-                headers={"User-Agent": "HorizonXI-Linux-Launcher/0.1"},
-            )
-
-            with urllib.request.urlopen(request, timeout=10) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+            payload = self.fetch_json_url(HORIZON_STATUS_URL, timeout=10)
 
             GLib.idle_add(self.apply_server_status, payload)
 
@@ -1135,7 +1946,15 @@ class HorizonWindow(Adw.Application):
         self.refresh_main_action_button()
         return False
 
+    def update_login_group_title(self):
+        if not getattr(self, "login_group", None):
+            return
+        username = self.username_entry.get_text().strip() if self.username_entry else ""
+        password = self.password_entry.get_text().strip() if self.password_entry else ""
+        self.login_group.set_title("Login" if (username or password) else "Create an account on the HorizonXI Website")
+
     def on_credentials_changed(self, entry):
+        self.update_login_group_title()
         if self.remember_check and self.remember_check.get_active() and not self.loading_saved_credentials:
             self.save_credentials()
         self.refresh_main_action_button()
