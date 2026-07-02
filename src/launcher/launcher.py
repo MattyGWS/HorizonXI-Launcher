@@ -31,7 +31,16 @@ def _umu_command(args, env=None, cwd=None):
     if cwd is not None:
         command.append(f"--directory={cwd}")
 
-    for key in ("WINEPREFIX", "PROTONPATH", "WINEDLLOVERRIDES"):
+    passthrough_env = (
+        "WINEPREFIX",
+        "PROTONPATH",
+        "WINEDLLOVERRIDES",
+        "PROTON_DXVK_D3D8",
+        "DXVK_FRAME_RATE",
+        "MESA_VK_WSI_PRESENT_MODE",
+    )
+
+    for key in passthrough_env:
         if env and key in env:
             command.append(f"--env={key}={env[key]}")
 
@@ -66,7 +75,7 @@ class Launcher:
             env=env if not IS_FLATPAK else None,
         )
 
-    def launch_game_direct(self, username: str, password: str):
+    def launch_game_direct(self, username: str, password: str, experimental_mode: bool = False):
         self._ensure_umu_executable()
         if not ASHITA_CLI_EXE.exists():
             raise RuntimeError("Ashita-cli.exe not found.")
@@ -76,7 +85,7 @@ class Launcher:
 
         self._update_ashita_boot_command(username, password)
 
-        env = self._build_env()
+        env = self._build_env(experimental_mode=experimental_mode)
         command = _umu_command(
             ["./Ashita-cli.exe", "ashita.ini"],
             env=env,
@@ -106,11 +115,22 @@ class Launcher:
     def _ensure_umu_executable(self):
         ensure_umu_run_available()
 
-    def _build_env(self):
+    def _build_env(self, experimental_mode: bool = False):
         env = os.environ.copy()
         env["WINEPREFIX"] = str(self.prefix_dir)
-        env["PROTONPATH"] = self.proton.get_path()
         env["WINEDLLOVERRIDES"] = "d3d8=n,b"
+
+        if experimental_mode:
+            if not self.proton.is_experimental_installed():
+                raise RuntimeError("Experimental Performance Mode is enabled, but Proton-CachyOS is not installed.")
+
+            env["PROTONPATH"] = self.proton.get_experimental_path()
+            env["PROTON_DXVK_D3D8"] = "1"
+            env["DXVK_FRAME_RATE"] = "60"
+            env["MESA_VK_WSI_PRESENT_MODE"] = "fifo"
+        else:
+            env["PROTONPATH"] = self.proton.get_path()
+
         return env
 
     def _update_ashita_boot_command(self, username: str, password: str):

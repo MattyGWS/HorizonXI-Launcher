@@ -58,6 +58,7 @@ VANA_WEEKDAYS = (
 
 CREDENTIALS_FILE = DATA_DIR / "credentials.json"
 FRIENDS_FILE = DATA_DIR / "friends.json"
+EXPERIMENTAL_SETTINGS_FILE = DATA_DIR / "experimental-settings.json"
 
 MAIN_ACTION_INSTALL = "install"
 MAIN_ACTION_MAINTENANCE = "maintenance"
@@ -114,6 +115,11 @@ class HorizonWindow(Adw.Application):
         self.plugins_rows_box = None
         self.polplugins_rows_box = None
         self.extensions_refresh_button = None
+        self.experimental_status_row = None
+        self.experimental_install_button = None
+        self.experimental_enable_switch = None
+        self.loading_experimental_settings = False
+        self.experimental_performance_enabled = False
 
         self.yells_rows_box = None
         self.yells_status_label = None
@@ -134,6 +140,8 @@ class HorizonWindow(Adw.Application):
         self.game_update_check_in_progress = False
         self.game_update_check_failed = False
         self.game_update_details = None
+
+        self.load_experimental_settings()
 
     def on_activate(self, app):
         self.window = Adw.ApplicationWindow(application=app)
@@ -1468,6 +1476,7 @@ class HorizonWindow(Adw.Application):
         settings_stack.add_titled(self.build_general_settings_page(), "general", "General")
         settings_stack.add_titled(self.build_graphics_settings_page(), "graphics", "Graphics")
         settings_stack.add_titled(self.build_tools_settings_page(), "tools", "Tools")
+        settings_stack.add_titled(self.build_experimental_settings_page(), "experimental", "Experimental")
 
         outer.append(settings_stack)
 
@@ -1668,6 +1677,77 @@ class HorizonWindow(Adw.Application):
 
         tools_box.append(danger_group)
 
+        return page
+
+    def build_experimental_settings_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=24, homogeneous=True)
+
+        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        page.append(left)
+        page.append(right)
+
+        left.append(self._make_centered_section_title("Experimental"))
+
+        experimental_group = Adw.PreferencesGroup(
+            title="Experimental Performance Mode",
+            description=(
+                "Optional high-performance setup for users who want to try higher FPS. "
+                "The default GE-Proton7-42 path remains the recommended stable mode."
+            ),
+        )
+
+        self.experimental_status_row = Adw.ActionRow(title="Experimental Components")
+        experimental_group.add(self.experimental_status_row)
+
+        self.experimental_install_button = Gtk.Button(label="Install Experimental Performance Mode")
+        self.experimental_install_button.add_css_class("suggested-action")
+        self.experimental_install_button.connect("clicked", self.on_install_experimental_clicked)
+
+        install_box = self._make_button_stack()
+        self.experimental_install_button.set_size_request(360, -1)
+        install_box.append(self.experimental_install_button)
+        experimental_group.add(install_box)
+
+        self.experimental_enable_switch = Adw.SwitchRow(title="Enable Experimental Performance Mode")
+        self.experimental_enable_switch.set_subtitle(
+            "When enabled, direct launch uses Proton-CachyOS with DXVK D3D8 and a 60 FPS frame cap."
+        )
+        self.experimental_enable_switch.connect("notify::active", self.on_experimental_enabled_toggled)
+        experimental_group.add(self.experimental_enable_switch)
+
+        warning = Gtk.Label(
+            label=(
+                "May improve performance, but can reduce stability. Disable this to instantly return "
+                "to the normal GE-Proton7-42 launch path."
+            )
+        )
+        warning.set_wrap(True)
+        warning.set_xalign(0)
+        warning.add_css_class("dim-label")
+        warning.set_margin_top(4)
+        experimental_group.add(warning)
+
+        left.append(experimental_group)
+
+        details_group = Adw.PreferencesGroup(title="What This Changes")
+        details = Gtk.Label(
+            label=(
+                "Enabled mode uses:\n"
+                "• Proton-CachyOS instead of GE-Proton7-42\n"
+                "• PROTON_DXVK_D3D8=1\n"
+                "• DXVK_FRAME_RATE=60\n"
+                "• MESA_VK_WSI_PRESENT_MODE=fifo\n\n"
+                "Install also runs winetricks for allfonts, corefonts, and gdiplus in the existing game prefix."
+            )
+        )
+        details.set_wrap(True)
+        details.set_xalign(0)
+        details.add_css_class("dim-label")
+        details_group.add(details)
+        right.append(details_group)
+
+        GLib.idle_add(self.load_experimental_settings_ui)
         return page
 
     def _add_switch_setting(self, group, key, title):
@@ -2003,7 +2083,19 @@ class HorizonWindow(Adw.Application):
         game_installed = self.installer.is_game_installed()
         official_launcher_installed = self.installer.is_official_launcher_installed()
 
-        self.proton_status.set_subtitle("✅ Installed" if proton_installed else "❌ Missing")
+        if self.experimental_performance_enabled:
+            if self.proton.is_experimental_installed():
+                self.proton_status.set_title("Proton-CachyOS")
+                self.proton_status.set_subtitle("✅ Experimental mode enabled")
+            else:
+                self.proton_status.set_title("Proton-CachyOS")
+                self.proton_status.set_subtitle("❌ Experimental mode enabled but missing")
+        else:
+            self.proton_status.set_title("Proton GE 7-42")
+            self.proton_status.set_subtitle("✅ Installed" if proton_installed else "❌ Missing")
+
+        self.refresh_experimental_status()
+
         game_status_text = self.get_display_game_status_text()
         self.game_status.set_subtitle(game_status_text)
 
@@ -2131,6 +2223,125 @@ class HorizonWindow(Adw.Application):
 
         return False
 
+    def load_experimental_settings(self):
+        self.experimental_performance_enabled = False
+
+        try:
+            if EXPERIMENTAL_SETTINGS_FILE.exists():
+                data = json.loads(EXPERIMENTAL_SETTINGS_FILE.read_text(encoding="utf-8"))
+                self.experimental_performance_enabled = bool(data.get("experimental_performance_enabled", False))
+        except Exception as error:
+            print(f"Failed to load experimental settings: {error}")
+            self.experimental_performance_enabled = False
+
+        return self.experimental_performance_enabled
+
+    def save_experimental_settings(self):
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            EXPERIMENTAL_SETTINGS_FILE.write_text(
+                json.dumps(
+                    {"experimental_performance_enabled": bool(self.experimental_performance_enabled)},
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except Exception as error:
+            print(f"Failed to save experimental settings: {error}")
+
+    def load_experimental_settings_ui(self):
+        self.loading_experimental_settings = True
+        enabled = self.load_experimental_settings()
+
+        if self.experimental_enable_switch:
+            self.experimental_enable_switch.set_active(enabled)
+
+        self.loading_experimental_settings = False
+        self.refresh_experimental_status()
+        self.refresh_status()
+        return False
+
+    def refresh_experimental_status(self):
+        installed = self.proton.is_experimental_installed()
+
+        if self.experimental_status_row:
+            status = self.proton.get_experimental_status_text()
+            if installed:
+                self.experimental_status_row.set_subtitle(f"✅ {status}")
+            else:
+                self.experimental_status_row.set_subtitle("❌ Not installed")
+
+        if self.experimental_enable_switch:
+            self.experimental_enable_switch.set_sensitive(installed and not self.operation_in_progress)
+            if not installed and self.experimental_enable_switch.get_active():
+                self.experimental_enable_switch.set_active(False)
+
+        if self.experimental_install_button:
+            self.experimental_install_button.set_sensitive(not self.operation_in_progress)
+
+    def on_experimental_enabled_toggled(self, row, pspec):
+        if self.loading_experimental_settings:
+            return
+
+        enabled = bool(row.get_active())
+
+        if enabled and not self.proton.is_experimental_installed():
+            row.set_active(False)
+            self.experimental_performance_enabled = False
+            self.save_experimental_settings()
+            if self.status_label:
+                self.status_label.set_text("Install Experimental Performance Mode before enabling it.")
+            return
+
+        self.experimental_performance_enabled = enabled
+        self.save_experimental_settings()
+
+        if self.status_label:
+            if enabled:
+                self.status_label.set_text("Experimental Performance Mode enabled for direct game launch.")
+            else:
+                self.status_label.set_text("Stable GE-Proton7-42 mode enabled.")
+
+        self.refresh_status()
+
+    def on_install_experimental_clicked(self, button):
+        self.run_install_experimental_async()
+
+    def run_install_experimental_async(self):
+        if self.operation_in_progress:
+            return
+
+        self.set_operation_in_progress(True)
+        self.update_progress("Installing Experimental Performance Mode...", 0.0)
+
+        def progress(message, fraction=None):
+            GLib.idle_add(self.update_progress, message, fraction)
+
+        def install_worker():
+            try:
+                self.proton.install_experimental(progress)
+                GLib.idle_add(
+                    self.on_install_experimental_finished,
+                    True,
+                    "Experimental Performance Mode installed.",
+                )
+            except Exception as error:
+                GLib.idle_add(
+                    self.on_install_experimental_finished,
+                    False,
+                    f"Experimental install failed: {error}",
+                )
+
+        threading.Thread(target=install_worker, daemon=True).start()
+
+    def on_install_experimental_finished(self, success, message):
+        self.update_progress(message, 1.0 if success else 0.0)
+        self.set_operation_in_progress(False)
+        self.refresh_experimental_status()
+        self.refresh_status()
+        return False
+
     def load_saved_credentials(self):
         self.loading_saved_credentials = True
 
@@ -2176,6 +2387,45 @@ class HorizonWindow(Adw.Application):
         else:
             self.clear_saved_credentials()
 
+    def get_level_sync_penalty_info(self, players):
+        try:
+            players = int(players)
+        except Exception:
+            return None
+
+        if players < 1000:
+            return {
+                "rate": "1.5%",
+                "range": "low",
+                "subtitle": "low population",
+            }
+
+        if players < 2000:
+            return {
+                "rate": "2%",
+                "range": "medium",
+                "subtitle": "medium population",
+            }
+
+        return {
+            "rate": "2.5%",
+            "range": "high",
+            "subtitle": "high population",
+        }
+
+    def get_players_status_subtitle(self, players):
+        if players is None:
+            return "👥 Unknown"
+
+        penalty = self.get_level_sync_penalty_info(players)
+        if not penalty:
+            return f"👥 {int(players):,}"
+
+        return (
+            f"👥 {int(players):,}  •  "
+            f"Level sync penalty {penalty['rate']} per level ({penalty['subtitle']})"
+        )
+
     def refresh_server_status_async(self):
         thread = threading.Thread(target=self.fetch_server_status, daemon=True)
         thread.start()
@@ -2208,10 +2458,7 @@ class HorizonWindow(Adw.Application):
 
             self.server_status.set_subtitle("🟢 Online")
 
-            if players is None:
-                self.players_status.set_subtitle("👥 Unknown")
-            else:
-                self.players_status.set_subtitle(f"👥 {int(players):,}")
+            self.players_status.set_subtitle(self.get_players_status_subtitle(players))
 
             if not self.operation_in_progress:
                 self.status_label.set_text("Ready")
@@ -2413,10 +2660,20 @@ class HorizonWindow(Adw.Application):
             self.refresh_main_action_button()
             return
 
+        experimental_mode = bool(self.experimental_performance_enabled)
+
+        if experimental_mode and not self.proton.is_experimental_installed():
+            self.status_label.set_text("Experimental Performance Mode is enabled, but Proton-CachyOS is not installed.")
+            self.refresh_main_action_button()
+            return
+
         try:
             self.save_credentials()
-            self.status_label.set_text("Launching HorizonXI directly...")
-            self.launcher.launch_game_direct(username, password)
+            if experimental_mode:
+                self.status_label.set_text("Launching HorizonXI directly with Experimental Performance Mode...")
+            else:
+                self.status_label.set_text("Launching HorizonXI directly...")
+            self.launcher.launch_game_direct(username, password, experimental_mode=experimental_mode)
             self.status_label.set_text("HorizonXI game started.")
         except Exception as error:
             self.status_label.set_text(f"Direct launch failed: {error}")
