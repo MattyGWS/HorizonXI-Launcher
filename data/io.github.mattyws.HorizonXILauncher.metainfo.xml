@@ -27,6 +27,37 @@
     </p>
   </description>
 
+  <screenshots>
+    <screenshot type="default">
+      <caption>Main launcher and game login</caption>
+      <image>https://raw.githubusercontent.com/MattyGWS/HorizonXI-Launcher/main/screenshots/HorizonScreenshot01.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Addon management</caption>
+      <image>https://raw.githubusercontent.com/MattyGWS/HorizonXI-Launcher/main/screenshots/HorizonScreenshot02.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Community features</caption>
+      <image>https://raw.githubusercontent.com/MattyGWS/HorizonXI-Launcher/main/screenshots/HorizonScreenshot03.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Launcher settings</caption>
+      <image>https://raw.githubusercontent.com/MattyGWS/HorizonXI-Launcher/main/screenshots/HorizonScreenshot04.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Game management tools</caption>
+      <image>https://raw.githubusercontent.com/MattyGWS/HorizonXI-Launcher/main/screenshots/HorizonScreenshot05.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Experimental performance mode</caption>
+      <image>https://raw.githubusercontent.com/MattyGWS/HorizonXI-Launcher/main/screenshots/HorizonScreenshot06.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Backup and repair tools</caption>
+      <image>https://raw.githubusercontent.com/MattyGWS/HorizonXI-Launcher/main/screenshots/HorizonScreenshot07.png</image>
+    </screenshot>
+  </screenshots>
+
   <categories>
     <category>Game</category>
     <category>RolePlaying</category>

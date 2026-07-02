@@ -10,15 +10,15 @@ command: horizonxi-launcher
 finish-args:
   - --share=network
   - --share=ipc
-  - --talk-name=org.freedesktop.Flatpak
   - --socket=x11
   - --socket=wayland
   - --socket=pulseaudio
   - --device=dri
   - --device=all
-  - --allow=devel
   - --allow=per-app-dev-shm
+  - --allow=devel
   - --allow=multiarch
+  - --talk-name=org.freedesktop.Flatpak
   - --filesystem=xdg-data/Steam/compatibilitytools.d:create
   - --filesystem=xdg-data/umu:create
   - --filesystem=~/.local/bin:create
