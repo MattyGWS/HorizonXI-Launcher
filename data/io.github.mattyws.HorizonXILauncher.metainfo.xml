@@ -1,12 +1,49 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 Matty Wyett-Simmonds -->
 <component type="desktop-application">
   <id>io.github.mattyws.HorizonXILauncher</id>
   <name>HorizonXI Launcher</name>
   <summary>Linux launcher for HorizonXI</summary>
+
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
+
+  <developer_name>Matty Wyett-Simmonds</developer_name>
+
+  <url type="homepage">https://github.com/MattyGWS/HorizonXI-Launcher</url>
+  <url type="bugtracker">https://github.com/MattyGWS/HorizonXI-Launcher/issues</url>
+
   <description>
-    <p>A Linux launcher for HorizonXI that installs, updates, configures, and launches the game through Proton/UMU.</p>
+    <p>
+      HorizonXI Launcher is an unofficial, Linux-native launcher for the popular HorizonXI private server.
+      It can download, install, update, configure, and launch the game through a native GTK interface.
+    </p>
+    <p>
+      The launcher also provides tools for managing game settings, logging in, launching directly into the game,
+      managing addons, backing up macros, repairing installations, and configuring Proton-based compatibility options.
+    </p>
+    <p>
+      This project is an unofficial community launcher and is not affiliated with the HorizonXI team.
+    </p>
   </description>
+
+  <categories>
+    <category>Game</category>
+    <category>RolePlaying</category>
+  </categories>
+
   <launchable type="desktop-id">io.github.mattyws.HorizonXILauncher.desktop</launchable>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.3.0" date="2026-07-02">
+      <description>
+        <p>
+          Initial Flathub-ready release. This version includes game installation and updates, login and launch support,
+          addon management, community features, macro backup tools, repair options, and Proton-based compatibility management.
+        </p>
+      </description>
+    </release>
+  </releases>
 </component>

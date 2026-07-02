@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDEs
+.vscode/
+.idea/
+
+# Build output
+build/
+dist/
+*.egg-info/
+
+# Flatpak builder
+.flatpak-builder/
+build-dir/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local launcher data
+cache/
+downloads/
+tmp/
+
+# DXVK cache
+*.dxvk-cache
+
+# Python cache
+.pytest_cache/
+.mypy_cache/
+
+# Compiled files
+*.so
+
+# Backup files
+*.bak
+*.old
+*.orig
