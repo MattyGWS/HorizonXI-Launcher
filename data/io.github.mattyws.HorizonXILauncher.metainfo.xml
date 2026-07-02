@@ -8,7 +8,9 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
 
-  <developer_name>Matty Wyett-Simmonds</developer_name>
+  <developer id="io.github.mattyws">
+    <name>Matty Wyett-Simmonds</name>
+  </developer>
 
   <url type="homepage">https://github.com/MattyGWS/HorizonXI-Launcher</url>
   <url type="bugtracker">https://github.com/MattyGWS/HorizonXI-Launcher/issues</url>
