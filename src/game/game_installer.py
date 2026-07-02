@@ -134,6 +134,51 @@ class GameInstallManager:
 
         return "Installed"
 
+
+    def check_update_available(self):
+        """Return installed/latest game version details without downloading patches.
+
+        The launcher UI uses this on startup to prevent direct game launch when
+        HorizonXI has published a newer game build. Network/API failures are
+        intentionally allowed to bubble up so the UI can fail closed instead of
+        launching a possibly outdated client.
+        """
+        installed_version = self.get_version() if self.is_installed() else None
+        installed_marketing_version = self.get_marketing_version() if self.is_installed() else None
+
+        latest_version = self.fetch_latest_version()
+        latest_marketing_version = None
+
+        update_available = False
+        if installed_version is not None:
+            try:
+                update_available = int(installed_version) < int(latest_version)
+            except Exception:
+                update_available = str(installed_version) != str(latest_version)
+
+        # latest-version usually gives the numeric build. If an update is pending,
+        # ask the update endpoint too so we can show the human marketing version
+        # when Horizon provides one, e.g. 1.9.3.
+        if update_available:
+            try:
+                update_manifest = self.fetch_update_manifest(int(installed_version))
+                patches = self.build_update_plan(update_manifest)
+                latest_marketing_version = self._best_marketing_version(
+                    {"latestVersion": latest_version, "updateData": update_manifest},
+                    patches,
+                )
+            except Exception:
+                latest_marketing_version = None
+
+        return {
+            "installed": self.is_installed(),
+            "installed_version": installed_version,
+            "installed_marketing_version": installed_marketing_version,
+            "latest_version": latest_version,
+            "latest_marketing_version": latest_marketing_version,
+            "update_available": bool(update_available),
+        }
+
     def install(self, progress_callback=None):
         """Install if missing, otherwise update if the API reports patches."""
         if self.is_installed():

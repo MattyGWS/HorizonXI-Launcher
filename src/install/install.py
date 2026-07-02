@@ -25,6 +25,9 @@ class InstallManager:
     def get_game_status_text(self):
         return self.game.get_status_text()
 
+    def check_game_update_available(self):
+        return self.game.check_update_available()
+
     def is_installed(self):
         return (
             self.is_proton_installed()

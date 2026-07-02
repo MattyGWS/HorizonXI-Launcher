@@ -4,7 +4,7 @@ import threading
 import urllib.request
 import urllib.parse
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import gi
@@ -36,6 +36,26 @@ YELLS_REFRESH_SECONDS = 15
 NEWS_REFRESH_SECONDS = 1800
 FRIENDS_REFRESH_SECONDS = 60
 
+VANA_EPOCH = datetime(2001, 12, 31, 15, 0, 0, tzinfo=timezone.utc)
+VANA_START_YEAR = 886
+VANA_TIME_MULTIPLIER = 25
+VANA_SECONDS_PER_DAY = 24 * 60 * 60
+VANA_DAYS_PER_MONTH = 30
+VANA_MONTHS_PER_YEAR = 12
+VANA_DAYS_PER_YEAR = VANA_DAYS_PER_MONTH * VANA_MONTHS_PER_YEAR
+VANA_MOON_CYCLE_DAYS = 84
+
+VANA_WEEKDAYS = (
+    ("Firesday", "#ef4444"),
+    ("Earthsday", "#c58f2f"),
+    ("Watersday", "#3b82f6"),
+    ("Windsday", "#22c55e"),
+    ("Iceday", "#67e8f9"),
+    ("Lightningday", "#d946ef"),
+    ("Lightsday", "#facc15"),
+    ("Darksday", "#a78bfa"),
+)
+
 CREDENTIALS_FILE = DATA_DIR / "credentials.json"
 FRIENDS_FILE = DATA_DIR / "friends.json"
 
@@ -43,6 +63,9 @@ MAIN_ACTION_INSTALL = "install"
 MAIN_ACTION_MAINTENANCE = "maintenance"
 MAIN_ACTION_LOGIN = "login"
 MAIN_ACTION_LAUNCH = "launch"
+MAIN_ACTION_UPDATE = "update"
+MAIN_ACTION_CHECKING_UPDATE = "checking_update"
+MAIN_ACTION_UPDATE_CHECK_FAILED = "update_check_failed"
 MAIN_ACTION_BUSY = "busy"
 
 
@@ -66,6 +89,8 @@ class HorizonWindow(Adw.Application):
         self.game_status = None
         self.server_status = None
         self.players_status = None
+        self.vana_time_label = None
+        self.vana_day_label = None
 
         self.settings_controls = {}
         self.settings_stack = None
@@ -105,6 +130,10 @@ class HorizonWindow(Adw.Application):
         self.operation_in_progress = False
         self.main_action_state = MAIN_ACTION_INSTALL
         self.loading_saved_credentials = False
+        self.game_update_available = False
+        self.game_update_check_in_progress = False
+        self.game_update_check_failed = False
+        self.game_update_details = None
 
     def on_activate(self, app):
         self.window = Adw.ApplicationWindow(application=app)
@@ -125,9 +154,19 @@ class HorizonWindow(Adw.Application):
             margin_end=24,
         )
 
+        header_overlay = Gtk.Overlay()
+        header_overlay.set_vexpand(False)
+
+        header_center_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=10,
+        )
+        header_center_box.set_halign(Gtk.Align.FILL)
+
         title = Gtk.Label(label="HorizonXI Launcher")
         title.add_css_class("title-1")
-        root_box.append(title)
+        title.set_halign(Gtk.Align.CENTER)
+        header_center_box.append(title)
 
         stack = Gtk.Stack()
         stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
@@ -138,7 +177,16 @@ class HorizonWindow(Adw.Application):
         switcher = Gtk.StackSwitcher()
         switcher.set_stack(stack)
         switcher.set_halign(Gtk.Align.CENTER)
-        root_box.append(switcher)
+        header_center_box.append(switcher)
+
+        header_overlay.set_child(header_center_box)
+
+        vanadiel_card = self.build_vanadiel_time_card()
+        vanadiel_card.set_halign(Gtk.Align.START)
+        vanadiel_card.set_valign(Gtk.Align.END)
+        header_overlay.add_overlay(vanadiel_card)
+
+        root_box.append(header_overlay)
 
         stack.add_titled(self.build_main_page(), "main", "Main")
         stack.add_titled(self.build_addons_page(), "addons", "Addons")
@@ -159,6 +207,7 @@ class HorizonWindow(Adw.Application):
         self.load_saved_credentials()
         self.load_friends()
         self.refresh_status()
+        self.refresh_game_update_status_async()
         self.refresh_server_status_async()
         self.refresh_yells_async()
         self.refresh_news_async()
@@ -168,11 +217,26 @@ class HorizonWindow(Adw.Application):
         GLib.timeout_add_seconds(YELLS_REFRESH_SECONDS, self.refresh_yells_async)
         GLib.timeout_add_seconds(NEWS_REFRESH_SECONDS, self.refresh_news_async)
         GLib.timeout_add_seconds(FRIENDS_REFRESH_SECONDS, self.refresh_friends_async)
+        GLib.idle_add(self.update_vanadiel_time)
+        GLib.timeout_add_seconds(1, self.update_vanadiel_time)
 
         self.window.present()
 
     def load_custom_css(self):
         css = b"""
+        .vanatime-panel {
+            background: rgba(54, 54, 58, 0.58);
+            border-radius: 10px;
+            padding: 10px 14px;
+        }
+
+        .vanatime-divider {
+            background: rgba(180, 180, 190, 0.35);
+            min-height: 1px;
+            margin-top: 4px;
+            margin-bottom: 6px;
+        }
+
         .yells-panel {
             background: rgba(28, 39, 62, 0.62);
             border-radius: 10px;
@@ -211,6 +275,11 @@ class HorizonWindow(Adw.Application):
             padding-left: 10px;
             padding-right: 10px;
             min-height: 28px;
+        }
+
+        .update-action {
+            background: @warning_color;
+            color: @warning_fg_color;
         }
         """
 
@@ -323,6 +392,112 @@ class HorizonWindow(Adw.Application):
         main_box.append(links_group)
 
         return main_box
+
+    def build_vanadiel_time_card(self):
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        card.add_css_class("vanatime-panel")
+        card.set_halign(Gtk.Align.START)
+        card.set_size_request(210, -1)
+
+        title = Gtk.Label(label="Vana'diel Time")
+        title.add_css_class("heading")
+        title.set_xalign(0)
+        card.append(title)
+
+        divider = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        divider.add_css_class("vanatime-divider")
+        card.append(divider)
+
+        self.vana_time_label = Gtk.Label(label="--:-- ~ ----—--—--")
+        self.vana_time_label.set_xalign(0)
+        card.append(self.vana_time_label)
+
+        self.vana_day_label = Gtk.Label()
+        self.vana_day_label.set_xalign(0)
+        self.vana_day_label.set_markup('<span foreground="#d946ef"><b>Loading...</b></span>')
+        card.append(self.vana_day_label)
+
+        return card
+
+    def get_vanadiel_datetime(self, now=None):
+        if now is None:
+            now = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        else:
+            now = now.astimezone(timezone.utc)
+
+        elapsed_earth_seconds = max(0, int((now - VANA_EPOCH).total_seconds()))
+        vana_elapsed_seconds = elapsed_earth_seconds * VANA_TIME_MULTIPLIER
+        start_offset_seconds = VANA_START_YEAR * VANA_DAYS_PER_YEAR * VANA_SECONDS_PER_DAY
+        total_vana_seconds = start_offset_seconds + vana_elapsed_seconds
+
+        total_vana_days = total_vana_seconds // VANA_SECONDS_PER_DAY
+        seconds_today = total_vana_seconds % VANA_SECONDS_PER_DAY
+
+        year = total_vana_days // VANA_DAYS_PER_YEAR
+        day_of_year = total_vana_days % VANA_DAYS_PER_YEAR
+        month = (day_of_year // VANA_DAYS_PER_MONTH) + 1
+        day = (day_of_year % VANA_DAYS_PER_MONTH) + 1
+        hour = seconds_today // 3600
+        minute = (seconds_today % 3600) // 60
+
+        weekday_index = total_vana_days % len(VANA_WEEKDAYS)
+
+        # Pyogenes/VanaTime/MithraPride moon formula.
+        # The +26 offset is the important bit that keeps Horizon wiki/Pyogenes
+        # aligned: without it, the moon percentage is consistently a few
+        # Vana'diel days out even when the clock/date are correct.
+        moon_raw_percent = self.get_vanadiel_moon_raw_percent(total_vana_days)
+        moon_percent = int(round(abs(moon_raw_percent)))
+        moon_icon = self.get_vanadiel_moon_icon(moon_raw_percent)
+
+        return {
+            "year": int(year),
+            "month": int(month),
+            "day": int(day),
+            "hour": int(hour),
+            "minute": int(minute),
+            "weekday_index": int(weekday_index),
+            "moon_percent": max(0, min(100, moon_percent)),
+            "moon_icon": moon_icon,
+        }
+
+    def get_vanadiel_moon_raw_percent(self, total_vana_days):
+        moon_value = (((int(total_vana_days) + 26) % VANA_MOON_CYCLE_DAYS) - (VANA_MOON_CYCLE_DAYS / 2))
+        return (moon_value / (VANA_MOON_CYCLE_DAYS / 2)) * 100
+
+    def get_vanadiel_moon_icon(self, moon_raw_percent):
+        percent = abs(float(moon_raw_percent))
+        waxing = moon_raw_percent >= 0
+
+        if percent < 7:
+            return "🌑"
+        if percent >= 90:
+            return "🌕"
+        if percent < 40:
+            return "☽" if waxing else "☾"
+        if percent < 57:
+            return "🌓" if waxing else "🌗"
+        return "🌔" if waxing else "🌖"
+
+    def update_vanadiel_time(self):
+        if not self.vana_time_label or not self.vana_day_label:
+            return True
+
+        vana = self.get_vanadiel_datetime()
+        day_name, day_color = VANA_WEEKDAYS[vana["weekday_index"]]
+
+        self.vana_time_label.set_text(
+            f'{vana["hour"]:02d}:{vana["minute"]:02d} ~ '
+            f'{vana["year"]}-{vana["month"]}-{vana["day"]}'
+        )
+        self.vana_day_label.set_markup(
+            f'<span foreground="{day_color}"><b>{html.escape(day_name)}</b></span>'
+            f'  {html.escape(vana["moon_icon"])} {vana["moon_percent"]}%'
+        )
+
+        return True
 
 
     def build_community_page(self):
@@ -1744,17 +1919,92 @@ class HorizonWindow(Adw.Application):
             return options[selected]
         return options[0]
 
+    def get_display_game_status_text(self):
+        game_status_text = self.installer.get_game_status_text()
+
+        if self.game_update_available and self.game_update_details:
+            installed = self.game_update_details.get("installed_marketing_version") or self.game_update_details.get("installed_version")
+            latest = self.game_update_details.get("latest_marketing_version") or self.game_update_details.get("latest_version")
+            if installed and latest:
+                return f"🎮 Version {installed} installed — update {latest} available"
+            return "🎮 Update available"
+
+        if self.game_update_check_in_progress and self.installer.is_game_installed():
+            if "installed" in game_status_text.lower():
+                return f"🎮 {game_status_text} — checking for updates..."
+            return "🎮 Checking for updates..."
+
+        if self.game_update_check_failed and self.installer.is_game_installed():
+            if "installed" in game_status_text.lower():
+                return f"🎮 {game_status_text} — update check failed"
+            return "🎮 Update check failed"
+
+        if "installed" in game_status_text.lower():
+            return f"🎮 {game_status_text}"
+        if "missing" in game_status_text.lower():
+            return f"❌ {game_status_text}"
+        return game_status_text
+
+    def refresh_game_update_status_async(self):
+        if self.operation_in_progress or self.game_update_check_in_progress:
+            return False
+
+        if not self.installer.is_game_installed():
+            self.game_update_available = False
+            self.game_update_check_failed = False
+            self.game_update_details = None
+            self.refresh_status()
+            return False
+
+        self.game_update_check_in_progress = True
+        self.game_update_check_failed = False
+        self.refresh_status()
+
+        def worker():
+            try:
+                details = self.installer.check_game_update_available()
+                GLib.idle_add(self.apply_game_update_status, details)
+            except Exception as error:
+                GLib.idle_add(self.apply_game_update_status_error, str(error))
+
+        threading.Thread(target=worker, daemon=True).start()
+        return False
+
+    def apply_game_update_status(self, details):
+        self.game_update_check_in_progress = False
+        self.game_update_check_failed = False
+        self.game_update_details = details if isinstance(details, dict) else None
+        self.game_update_available = bool(self.game_update_details and self.game_update_details.get("update_available"))
+
+        if self.status_label and not self.operation_in_progress:
+            if self.game_update_available:
+                latest = self.game_update_details.get("latest_marketing_version") or self.game_update_details.get("latest_version")
+                self.status_label.set_text(f"HorizonXI game update {latest} is available.")
+            else:
+                self.status_label.set_text("Ready")
+
+        self.refresh_status()
+        return False
+
+    def apply_game_update_status_error(self, error_message):
+        self.game_update_check_in_progress = False
+        self.game_update_check_failed = True
+        self.game_update_available = False
+        self.game_update_details = None
+
+        if self.status_label and not self.operation_in_progress:
+            self.status_label.set_text(f"Could not check for game updates: {error_message}")
+
+        self.refresh_status()
+        return False
+
     def refresh_status(self):
         proton_installed = self.proton.is_installed()
         game_installed = self.installer.is_game_installed()
         official_launcher_installed = self.installer.is_official_launcher_installed()
 
         self.proton_status.set_subtitle("✅ Installed" if proton_installed else "❌ Missing")
-        game_status_text = self.installer.get_game_status_text()
-        if "installed" in game_status_text.lower():
-            game_status_text = f"🎮 {game_status_text}"
-        elif "missing" in game_status_text.lower():
-            game_status_text = f"❌ {game_status_text}"
+        game_status_text = self.get_display_game_status_text()
         self.game_status.set_subtitle(game_status_text)
 
         if self.gamepad_button:
@@ -1786,6 +2036,15 @@ class HorizonWindow(Adw.Application):
         if not self.installer.is_game_installed():
             return MAIN_ACTION_INSTALL
 
+        if self.game_update_check_in_progress:
+            return MAIN_ACTION_CHECKING_UPDATE
+
+        if self.game_update_check_failed:
+            return MAIN_ACTION_UPDATE_CHECK_FAILED
+
+        if self.game_update_available:
+            return MAIN_ACTION_UPDATE
+
         if not self.server_online:
             return MAIN_ACTION_MAINTENANCE
 
@@ -1797,6 +2056,22 @@ class HorizonWindow(Adw.Application):
 
         return MAIN_ACTION_LAUNCH
 
+    def set_main_button_style(self, css_class=None):
+        if not self.launch_game_button:
+            return
+
+        for class_name in ("suggested-action", "destructive-action", "update-action"):
+            try:
+                self.launch_game_button.remove_css_class(class_name)
+            except Exception:
+                pass
+
+        if css_class:
+            try:
+                self.launch_game_button.add_css_class(css_class)
+            except Exception:
+                pass
+
     def refresh_main_action_button(self):
         if not self.launch_game_button:
             return
@@ -1805,18 +2080,35 @@ class HorizonWindow(Adw.Application):
         self.main_action_state = state
 
         if state == MAIN_ACTION_BUSY:
+            self.set_main_button_style()
             self.launch_game_button.set_label("Working...")
             self.launch_game_button.set_sensitive(False)
         elif state == MAIN_ACTION_INSTALL:
+            self.set_main_button_style("suggested-action")
             self.launch_game_button.set_label("Install Game")
             self.launch_game_button.set_sensitive(True)
+        elif state == MAIN_ACTION_CHECKING_UPDATE:
+            self.set_main_button_style()
+            self.launch_game_button.set_label("Checking for Updates...")
+            self.launch_game_button.set_sensitive(False)
+        elif state == MAIN_ACTION_UPDATE_CHECK_FAILED:
+            self.set_main_button_style()
+            self.launch_game_button.set_label("Update Check Failed")
+            self.launch_game_button.set_sensitive(False)
+        elif state == MAIN_ACTION_UPDATE:
+            self.set_main_button_style("update-action")
+            self.launch_game_button.set_label("Update Game")
+            self.launch_game_button.set_sensitive(True)
         elif state == MAIN_ACTION_MAINTENANCE:
+            self.set_main_button_style()
             self.launch_game_button.set_label("Server Maintenance")
             self.launch_game_button.set_sensitive(False)
         elif state == MAIN_ACTION_LOGIN:
+            self.set_main_button_style("suggested-action")
             self.launch_game_button.set_label("Log In")
             self.launch_game_button.set_sensitive(True)
         else:
+            self.set_main_button_style("suggested-action")
             self.launch_game_button.set_label("Launch Game")
             self.launch_game_button.set_sensitive(True)
 
@@ -1963,6 +2255,9 @@ class HorizonWindow(Adw.Application):
         if self.operation_in_progress:
             return
 
+        self.game_update_check_in_progress = False
+        self.game_update_check_failed = False
+        self.game_update_available = False
         self.set_operation_in_progress(True)
         self.update_progress(message, 0.0)
 
@@ -1985,6 +2280,8 @@ class HorizonWindow(Adw.Application):
         self.update_progress(message, 1.0 if success else 0.0)
         self.set_operation_in_progress(False)
         self.refresh_status()
+        if success:
+            self.refresh_game_update_status_async()
         self.refresh_addons_list()
         self.refresh_extensions_list()
         self.load_settings_ui()
@@ -1995,6 +2292,10 @@ class HorizonWindow(Adw.Application):
 
         if state == MAIN_ACTION_INSTALL:
             self.run_install_async("Installing HorizonXI game...")
+            return
+
+        if state == MAIN_ACTION_UPDATE:
+            self.run_install_async("Updating HorizonXI game...")
             return
 
         if state == MAIN_ACTION_LOGIN:
@@ -2089,6 +2390,21 @@ class HorizonWindow(Adw.Application):
 
         if not username or not password:
             self.status_label.set_text("Enter username and password first.")
+            self.refresh_main_action_button()
+            return
+
+        if self.game_update_check_in_progress:
+            self.status_label.set_text("Still checking for game updates. Please wait.")
+            self.refresh_main_action_button()
+            return
+
+        if self.game_update_check_failed:
+            self.status_label.set_text("Game update check failed, so direct launch is blocked.")
+            self.refresh_main_action_button()
+            return
+
+        if self.game_update_available:
+            self.status_label.set_text("Update HorizonXI before launching.")
             self.refresh_main_action_button()
             return
 
