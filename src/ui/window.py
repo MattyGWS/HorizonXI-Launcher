@@ -31,6 +31,7 @@ from proton.proton_manager import ProtonManager
 HORIZON_STATUS_URL = "https://api.horizonxi.com/api/v1/misc/status"
 HORIZON_YELLS_URL = "https://api.horizonxi.com/api/v1/misc/yells"
 HORIZON_NEWS_URL = "https://horizonxi.com/news.json"
+HORIZON_ADDONS_URL = "https://horizonxi.com/addons.json"
 HORIZON_CHARS_URL = "https://api.horizonxi.com/api/v1/chars"
 HORIZON_CHAR_URL = "https://api.horizonxi.com/api/v1/chars/{name}"
 HORIZON_BAZAAR_URL = "https://api.horizonxi.com/api/v1/items/bazaar"
@@ -93,6 +94,8 @@ CREDENTIALS_FILE = DATA_DIR / "credentials.json"
 FRIENDS_FILE = DATA_DIR / "friends.json"
 FRIENDS_CACHE_FILE = DATA_DIR / "friends-cache.json"
 EXPERIMENTAL_SETTINGS_FILE = DATA_DIR / "experimental-settings.json"
+ADDON_POLICY_CACHE_FILE = DATA_DIR / "addon-policy-cache.json"
+ADDON_POLICY_FALLBACK_NOTE = "This addon is listed as prohibited by HorizonXI."
 
 APP_DIR = Path(__file__).resolve().parent
 FRIEND_ONLINE_SOUND_CANDIDATES = (
@@ -153,6 +156,10 @@ class HorizonWindow(Adw.Application):
         self.remember_check = None
         self.addons_rows_box = None
         self.addons_refresh_button = None
+        self.addon_policy_loaded = False
+        self.addon_policy_loading = False
+        self.addon_policy_error = None
+        self.addon_policy_from_cache = False
         self.plugins_rows_box = None
         self.polplugins_rows_box = None
         self.extensions_refresh_button = None
@@ -280,6 +287,8 @@ class HorizonWindow(Adw.Application):
 
         self.load_saved_credentials()
         self.load_friends()
+        self.load_addon_policy_cache()
+        self.refresh_addon_policy_async()
         GLib.idle_add(self.render_friends)
         self.refresh_status()
         self.refresh_game_update_status_async()
@@ -388,6 +397,11 @@ class HorizonWindow(Adw.Application):
         .update-action {
             background: @warning_color;
             color: @warning_fg_color;
+        }
+
+        .prohibited-addon-row {
+            background: alpha(@error_color, 0.12);
+            color: @error_color;
         }
         """
 
@@ -1997,6 +2011,147 @@ class HorizonWindow(Adw.Application):
 
         return page
 
+    def refresh_addon_policy_async(self):
+        if self.app_closing:
+            return False
+
+        if self.addon_policy_loading:
+            return False
+
+        self.addon_policy_loading = True
+        self.addon_policy_error = None
+
+        if self.addons_refresh_button:
+            self.addons_refresh_button.set_sensitive(False)
+
+        # If no cached policy is available yet, do not show togglable addon rows
+        # until the official HorizonXI prohibited list has loaded.
+        if not self.addon_policy_loaded:
+            GLib.idle_add(self.refresh_addons_list)
+
+        thread = threading.Thread(target=self.fetch_addon_policy, daemon=True)
+        thread.start()
+        return False
+
+    def fetch_addon_policy(self):
+        try:
+            payload = self.fetch_json_url(HORIZON_ADDONS_URL, timeout=10)
+            GLib.idle_add(self.apply_addon_policy, payload)
+        except Exception as error:
+            GLib.idle_add(self.apply_addon_policy_error, str(error))
+
+    def extract_ashita_prohibited_addons(self, payload):
+        prohibited = {}
+
+        if not isinstance(payload, list):
+            return prohibited
+
+        for group in payload:
+            if not isinstance(group, dict):
+                continue
+
+            platform = str(group.get("platform", "")).strip().casefold()
+            status = str(group.get("status", "")).strip().casefold()
+            label = str(group.get("label", "")).strip().casefold()
+
+            if platform != "ashita" or status != "prohibited":
+                continue
+
+            # Be explicit about the group we care about while still tolerating
+            # minor label changes as long as platform/status are correct.
+            if label and label != "ashita - prohibited addons":
+                continue
+
+            items = group.get("items", [])
+            if not isinstance(items, list):
+                continue
+
+            for item in items:
+                if isinstance(item, dict):
+                    name = str(item.get("name", "")).strip()
+                    note = str(item.get("note") or ADDON_POLICY_FALLBACK_NOTE).strip()
+                    link = str(item.get("link", "")).strip()
+                else:
+                    name = str(item).strip()
+                    note = ADDON_POLICY_FALLBACK_NOTE
+                    link = ""
+
+                if not name:
+                    continue
+
+                prohibited[name.casefold()] = {
+                    "name": name,
+                    "note": note or ADDON_POLICY_FALLBACK_NOTE,
+                    "link": link,
+                }
+
+        return prohibited
+
+    def load_addon_policy_cache(self):
+        try:
+            if not ADDON_POLICY_CACHE_FILE.exists():
+                return False
+
+            data = json.loads(ADDON_POLICY_CACHE_FILE.read_text(encoding="utf-8"))
+            prohibited = data.get("prohibited_addons", data) if isinstance(data, dict) else {}
+            if not isinstance(prohibited, dict) or not prohibited:
+                return False
+
+            self.addon_manager.set_prohibited_addons(prohibited)
+            self.addon_policy_loaded = True
+            self.addon_policy_from_cache = True
+            self.addon_policy_error = None
+            return True
+        except Exception as error:
+            print(f"Failed to load addon policy cache: {error}")
+            return False
+
+    def save_addon_policy_cache(self, prohibited_addons):
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            ADDON_POLICY_CACHE_FILE.write_text(
+                json.dumps({"prohibited_addons": prohibited_addons}, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except Exception as error:
+            print(f"Failed to save addon policy cache: {error}")
+
+    def apply_addon_policy(self, payload):
+        if self.app_closing:
+            return False
+
+        prohibited = self.extract_ashita_prohibited_addons(payload)
+        self.addon_manager.set_prohibited_addons(prohibited)
+        self.addon_policy_loaded = True
+        self.addon_policy_loading = False
+        self.addon_policy_error = None
+        self.addon_policy_from_cache = False
+
+        if prohibited:
+            self.save_addon_policy_cache(prohibited)
+
+        if self.addons_refresh_button:
+            self.addons_refresh_button.set_sensitive(True)
+
+        self.refresh_addons_list()
+        return False
+
+    def apply_addon_policy_error(self, error_message):
+        if self.app_closing:
+            return False
+
+        self.addon_policy_loading = False
+        self.addon_policy_error = str(error_message)
+
+        if not self.addon_policy_loaded:
+            self.load_addon_policy_cache()
+
+        if self.addons_refresh_button:
+            self.addons_refresh_button.set_sensitive(True)
+
+        self.refresh_addons_list()
+        return False
+
     def refresh_addons_list(self):
         if not self.addons_rows_box:
             return False
@@ -2015,6 +2170,26 @@ class HorizonWindow(Adw.Application):
             self.addons_rows_box.append(group)
             return False
 
+        if not self.addon_policy_loaded:
+            title = "Checking HorizonXI Addon Policy"
+            if self.addon_policy_error:
+                title = "Addon policy unavailable"
+
+            group = Adw.PreferencesGroup(title=title)
+            row = Adw.ActionRow(title="Addon toggles locked until policy loads")
+            if self.addon_policy_error:
+                row.set_subtitle(
+                    f"Could not load {HORIZON_ADDONS_URL}: {self.addon_policy_error}. "
+                    "Refresh Addons to try again."
+                )
+            else:
+                row.set_subtitle(
+                    "Loading the official Ashita prohibited addon list before showing toggles."
+                )
+            group.add(row)
+            self.addons_rows_box.append(group)
+            return False
+
         addons = self.addon_manager.scan_addons()
 
         if not addons:
@@ -2025,22 +2200,53 @@ class HorizonWindow(Adw.Application):
             self.addons_rows_box.append(group)
             return False
 
-        group = Adw.PreferencesGroup(title=f"Detected Addons ({len(addons)})")
+        normal_addons = [addon for addon in addons if not getattr(addon, "prohibited", False)]
+        prohibited_addons = [addon for addon in addons if getattr(addon, "prohibited", False)]
 
-        for addon in addons:
-            row = Adw.SwitchRow(title=addon.name)
-            row.set_subtitle(addon.description)
-            row.set_active(addon.enabled)
-            row.connect("notify::active", self.on_addon_switch_toggled, addon.name)
-            group.add(row)
+        normal_group = Adw.PreferencesGroup(title=f"Detected Addons ({len(normal_addons)})")
 
-        self.addons_rows_box.append(group)
+        if normal_addons:
+            for addon in normal_addons:
+                row = Adw.SwitchRow(title=addon.name)
+                row.set_subtitle(addon.description)
+                row.set_active(addon.enabled)
+                row.connect("notify::active", self.on_addon_switch_toggled, addon.name, addon.folder)
+                normal_group.add(row)
+        else:
+            row = Adw.ActionRow(title="No approved/unknown addons detected")
+            row.set_subtitle("Only prohibited addons were found in Game/addons.")
+            normal_group.add(row)
+
+        self.addons_rows_box.append(normal_group)
+
+        if prohibited_addons:
+            prohibited_group = Adw.PreferencesGroup(
+                title=f"Prohibited Addons ({len(prohibited_addons)})",
+                description="These are listed under Ashita - Prohibited Addons by HorizonXI and are forced off.",
+            )
+
+            for addon in prohibited_addons:
+                self.addon_manager.disable_addon_everywhere(addon.name, addon.folder)
+                note = getattr(addon, "prohibited_note", "") or ADDON_POLICY_FALLBACK_NOTE
+                row = Adw.SwitchRow(title=f"⛔ {addon.name} — Prohibited")
+                row.add_css_class("prohibited-addon-row")
+                row.set_subtitle(note)
+                row.set_active(False)
+                row.connect("notify::active", self.on_addon_switch_toggled, addon.name, addon.folder)
+                prohibited_group.add(row)
+
+            self.addons_rows_box.append(prohibited_group)
+
         return False
 
     def on_refresh_addons_clicked(self, button):
+        self.refresh_addon_policy_async()
         self.refresh_addons_list()
         if self.status_label:
-            self.status_label.set_text("Addon list refreshed.")
+            if self.addon_policy_loading:
+                self.status_label.set_text("Refreshing HorizonXI addon policy...")
+            else:
+                self.status_label.set_text("Addon list refreshed.")
 
     def on_reset_addons_clicked(self, button):
         try:
@@ -2052,8 +2258,18 @@ class HorizonWindow(Adw.Application):
             if self.status_label:
                 self.status_label.set_text(f"Failed to reset addons: {error}")
 
-    def on_addon_switch_toggled(self, row, pspec, addon_name):
+    def on_addon_switch_toggled(self, row, pspec, addon_name, addon_folder=None):
         try:
+            prohibited_info = self.addon_manager.get_prohibited_addon_info(addon_name, addon_folder)
+            if prohibited_info:
+                self.addon_manager.disable_addon_everywhere(addon_name, addon_folder)
+                if row.get_active():
+                    row.set_active(False)
+                if self.status_label:
+                    display_name = prohibited_info.get("name") or addon_name
+                    self.status_label.set_text(f"Addon {display_name} is prohibited by HorizonXI and has been kept disabled.")
+                return
+
             enabled = row.get_active()
             self.addon_manager.set_addon_enabled(addon_name, enabled)
             if self.status_label:

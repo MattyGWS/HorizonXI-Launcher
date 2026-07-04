@@ -8,6 +8,7 @@ from config import GAME_DIR
 ADDONS_START = "# --HORIZON_ADDONS_START--"
 ADDONS_STOP = "# --HORIZON_ADDONS_STOP--"
 DEFAULT_SCRIPT_SNAPSHOT = "linux-launcher-default-script.txt"
+PROHIBITED_ADDON_FALLBACK_NOTE = "This addon is listed as prohibited by HorizonXI."
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,8 @@ class AddonInfo:
     lua_path: Path
     description: str = ""
     enabled: bool = False
+    prohibited: bool = False
+    prohibited_note: str = ""
 
 
 class AddonManager:
@@ -24,6 +27,10 @@ class AddonManager:
         self.game_dir = GAME_DIR
         self.addons_dir = self.game_dir / "addons"
         self.default_script = self.game_dir / "scripts" / "default.txt"
+        # Filled by the UI from https://horizonxi.com/addons.json.
+        # Keeping this here makes prohibited-addon blocking happen at the
+        # file-writing layer too, not only in the visible GTK rows.
+        self.prohibited_addons = {}
 
     def is_available(self):
         return self.addons_dir.exists() and self.default_script.exists()
@@ -89,17 +96,100 @@ class AddonManager:
 
             addon_name = self._read_addon_name(lua_path) or folder.name
             addon_description = self._read_addon_description(lua_path) or "No description provided."
+            prohibited_info = self.get_prohibited_addon_info(addon_name, folder.name)
+            is_prohibited = prohibited_info is not None
+            prohibited_note = ""
+
+            if is_prohibited:
+                prohibited_note = str(
+                    prohibited_info.get("note")
+                    or PROHIBITED_ADDON_FALLBACK_NOTE
+                ).strip()
+                addon_description = prohibited_note
+
             addons.append(
                 AddonInfo(
                     name=addon_name,
                     folder=folder.name,
                     lua_path=lua_path,
                     description=addon_description,
-                    enabled=addon_name.lower() in enabled,
+                    enabled=(not is_prohibited and addon_name.lower() in enabled),
+                    prohibited=is_prohibited,
+                    prohibited_note=prohibited_note,
                 )
             )
 
         return addons
+
+    def set_prohibited_addons(self, prohibited_addons):
+        """Set the HorizonXI Ashita prohibited-addon policy map.
+
+        Expected input is a dict keyed by addon name, with values such as
+        {"name": "Casper", "note": "..."}. The manager stores normalized
+        keys so checks are case-insensitive.
+        """
+        self.prohibited_addons = {}
+
+        if not isinstance(prohibited_addons, dict):
+            return
+
+        for key, value in prohibited_addons.items():
+            if isinstance(value, dict):
+                display_name = str(value.get("name") or key or "").strip()
+                if not display_name:
+                    continue
+                item = dict(value)
+                item["name"] = display_name
+            else:
+                display_name = str(key or value or "").strip()
+                if not display_name:
+                    continue
+                item = {"name": display_name}
+
+            item["note"] = str(item.get("note") or PROHIBITED_ADDON_FALLBACK_NOTE).strip()
+
+            for policy_key in self._policy_name_keys(display_name):
+                self.prohibited_addons[policy_key] = item
+
+    def is_addon_prohibited(self, addon_name, addon_folder=None):
+        return self.get_prohibited_addon_info(addon_name, addon_folder) is not None
+
+    def get_prohibited_addon_info(self, addon_name, addon_folder=None):
+        for candidate in (addon_name, addon_folder):
+            for key in self._policy_name_keys(candidate):
+                if key in self.prohibited_addons:
+                    return self.prohibited_addons[key]
+        return None
+
+    def disable_addon_everywhere(self, addon_name, addon_folder=None):
+        """Remove possible load lines for both display name and folder name."""
+        names = []
+        for candidate in (addon_name, addon_folder):
+            candidate = str(candidate or "").strip()
+            if candidate and candidate.lower() not in [name.lower() for name in names]:
+                names.append(candidate)
+
+        for name in names:
+            self.set_addon_enabled(name, False)
+
+    def _normalize_policy_name(self, name):
+        return str(name or "").strip().casefold()
+
+    def _compact_policy_name(self, name):
+        # Helpful for minor formatting differences such as "No-ckback" vs
+        # "nockback", while still avoiding broad/fuzzy matching.
+        return re.sub(r"[^a-z0-9]+", "", self._normalize_policy_name(name))
+
+    def _policy_name_keys(self, name):
+        normalized = self._normalize_policy_name(name)
+        if not normalized:
+            return []
+
+        keys = [normalized]
+        compact = self._compact_policy_name(normalized)
+        if compact and compact != normalized:
+            keys.append(compact)
+        return keys
 
     def get_enabled_addons(self):
         lines = self._read_lines()
@@ -120,6 +210,11 @@ class AddonManager:
         addon_name = addon_name.strip()
         if not addon_name:
             return
+
+        # Prohibited addons are never written as enabled, even if some future
+        # UI path accidentally asks for it.
+        if enabled and self.is_addon_prohibited(addon_name):
+            enabled = False
 
         lines = self._read_lines()
         start, stop = self._find_block(lines)
