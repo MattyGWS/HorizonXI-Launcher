@@ -3,6 +3,7 @@ import json
 import shutil
 import subprocess
 import threading
+import concurrent.futures
 import urllib.request
 import urllib.parse
 import zipfile
@@ -15,7 +16,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gio, GLib, Gtk, Gdk
+from gi.repository import Adw, Gio, GLib, Gtk, Gdk, Pango
 
 from config import DATA_DIR, GAME_DIR
 from addons.addon_manager import AddonManager
@@ -34,9 +35,19 @@ HORIZON_CHARS_URL = "https://api.horizonxi.com/api/v1/chars"
 HORIZON_CHAR_URL = "https://api.horizonxi.com/api/v1/chars/{name}"
 HORIZON_BAZAAR_URL = "https://api.horizonxi.com/api/v1/items/bazaar"
 
-YELLS_REFRESH_SECONDS = 5
+YELLS_REFRESH_SECONDS = 30
 NEWS_REFRESH_SECONDS = 1800
-FRIENDS_REFRESH_SECONDS = 5
+FRIENDS_REFRESH_SECONDS = 30
+
+NEWS_CATEGORY_ALL = "all"
+NEWS_SERVER_NOTICE_CATEGORY = "server-notices"
+NEWS_DEFAULT_CATEGORIES = (
+    ("announcements", "Announcement"),
+    ("patch-notes", "Patch Notes"),
+    ("server-notices", "Server Notice"),
+    ("launcher-notices", "Launcher Notice"),
+    ("known-issues", "Known Issue"),
+)
 
 VANA_EPOCH = datetime(2001, 12, 31, 15, 0, 0, tzinfo=timezone.utc)
 VANA_START_YEAR = 886
@@ -80,6 +91,7 @@ VANA_MOON_STATES = (
 
 CREDENTIALS_FILE = DATA_DIR / "credentials.json"
 FRIENDS_FILE = DATA_DIR / "friends.json"
+FRIENDS_CACHE_FILE = DATA_DIR / "friends-cache.json"
 EXPERIMENTAL_SETTINGS_FILE = DATA_DIR / "experimental-settings.json"
 
 APP_DIR = Path(__file__).resolve().parent
@@ -146,6 +158,7 @@ class HorizonWindow(Adw.Application):
         self.extensions_refresh_button = None
         self.experimental_status_row = None
         self.experimental_install_button = None
+        self.experimental_progress_bar = None
         self.experimental_enable_switch = None
         self.loading_experimental_settings = False
         self.experimental_performance_enabled = False
@@ -154,6 +167,16 @@ class HorizonWindow(Adw.Application):
         self.yells_status_label = None
         self.news_rows_box = None
         self.news_status_label = None
+        self.news_filter_box = None
+        self.news_filter_buttons = {}
+        self.news_articles = []
+        self.news_categories = list(NEWS_DEFAULT_CATEGORIES)
+        self.news_selected_category = NEWS_CATEGORY_ALL
+        self.latest_server_notice_button = None
+        self.latest_server_notice_title_label = None
+        self.latest_server_notice_meta_label = None
+        self.latest_server_notice_excerpt_label = None
+        self.latest_server_notice_url = "https://horizonxi.com/news"
         self.friends_rows_box = None
         self.friends_status_label = None
         self.friend_names = []
@@ -161,6 +184,16 @@ class HorizonWindow(Adw.Application):
         self.characters_by_name = {}
         self.previous_friend_online_states = None
         self.friend_online_sound = None
+        self.friends_refresh_in_progress = False
+        self.friends_loaded_once = False
+        self.friends_last_error = None
+        self.app_closing = False
+        self.server_status_timer_id = None
+        self.yells_refresh_timer_id = None
+        self.news_refresh_timer_id = None
+        self.friends_refresh_timer_id = None
+        self.vanadiel_timer_id = None
+        self.friend_sound_processes = []
 
         self.server_online = False
         self.players_online = None
@@ -176,6 +209,7 @@ class HorizonWindow(Adw.Application):
 
     def on_activate(self, app):
         self.window = Adw.ApplicationWindow(application=app)
+        self.window.connect("close-request", self.on_window_close_request)
         self.window.set_title("HorizonXI Launcher")
         self.window.set_default_size(1120, 640)
         self.window.set_size_request(900, 560)
@@ -246,6 +280,7 @@ class HorizonWindow(Adw.Application):
 
         self.load_saved_credentials()
         self.load_friends()
+        GLib.idle_add(self.render_friends)
         self.refresh_status()
         self.refresh_game_update_status_async()
         self.refresh_server_status_async()
@@ -253,14 +288,47 @@ class HorizonWindow(Adw.Application):
         self.refresh_news_async()
         self.refresh_friends_async()
 
-        GLib.timeout_add_seconds(60, self.refresh_server_status_async)
-        GLib.timeout_add_seconds(YELLS_REFRESH_SECONDS, self.refresh_yells_async)
-        GLib.timeout_add_seconds(NEWS_REFRESH_SECONDS, self.refresh_news_async)
-        GLib.timeout_add_seconds(FRIENDS_REFRESH_SECONDS, self.refresh_friends_async)
+        self.server_status_timer_id = GLib.timeout_add_seconds(60, self.refresh_server_status_async)
+        self.yells_refresh_timer_id = GLib.timeout_add_seconds(YELLS_REFRESH_SECONDS, self.refresh_yells_async)
+        self.news_refresh_timer_id = GLib.timeout_add_seconds(NEWS_REFRESH_SECONDS, self.refresh_news_async)
+        self.friends_refresh_timer_id = GLib.timeout_add_seconds(FRIENDS_REFRESH_SECONDS, self.refresh_friends_async)
         GLib.idle_add(self.update_vanadiel_time)
-        GLib.timeout_add_seconds(1, self.update_vanadiel_time)
+        self.vanadiel_timer_id = GLib.timeout_add_seconds(1, self.update_vanadiel_time)
 
         self.window.present()
+
+    def on_window_close_request(self, window):
+        self.app_closing = True
+        self.friends_refresh_in_progress = False
+
+        for source_id in (
+            self.server_status_timer_id,
+            self.yells_refresh_timer_id,
+            self.news_refresh_timer_id,
+            self.friends_refresh_timer_id,
+            self.vanadiel_timer_id,
+        ):
+            if source_id:
+                try:
+                    GLib.source_remove(source_id)
+                except Exception:
+                    pass
+
+        self.server_status_timer_id = None
+        self.yells_refresh_timer_id = None
+        self.news_refresh_timer_id = None
+        self.friends_refresh_timer_id = None
+        self.vanadiel_timer_id = None
+
+        for process in list(self.friend_sound_processes):
+            try:
+                if process.poll() is None:
+                    process.terminate()
+            except Exception:
+                pass
+
+        self.friend_sound_processes = []
+        return False
 
     def load_custom_css(self):
         css = b"""
@@ -411,6 +479,7 @@ class HorizonWindow(Adw.Application):
         right_box.append(self.login_group)
 
         main_box.append(content_box)
+        main_box.append(self.build_latest_server_notice_group())
 
         links_group = Adw.PreferencesGroup(title="HorizonXI Links")
         links_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -432,6 +501,44 @@ class HorizonWindow(Adw.Application):
         main_box.append(links_group)
 
         return main_box
+
+    def build_latest_server_notice_group(self):
+        group = Adw.PreferencesGroup(
+            title="Latest Server Notice",
+            description="Most recent HorizonXI server notice from the official news feed.",
+        )
+
+        self.latest_server_notice_button = Gtk.Button()
+        self.latest_server_notice_button.set_halign(Gtk.Align.FILL)
+        self.latest_server_notice_button.set_sensitive(False)
+        self.latest_server_notice_button.connect("clicked", self.on_latest_server_notice_clicked)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
+        box.set_margin_start(10)
+        box.set_margin_end(10)
+
+        self.latest_server_notice_title_label = Gtk.Label(label="Checking latest server notice...")
+        self.latest_server_notice_title_label.add_css_class("heading")
+        self.latest_server_notice_title_label.set_xalign(0)
+        self.latest_server_notice_title_label.set_wrap(True)
+        box.append(self.latest_server_notice_title_label)
+
+        self.latest_server_notice_meta_label = Gtk.Label(label="")
+        self.latest_server_notice_meta_label.add_css_class("dim-label")
+        self.latest_server_notice_meta_label.set_xalign(0)
+        self.latest_server_notice_meta_label.set_wrap(True)
+        box.append(self.latest_server_notice_meta_label)
+
+        self.latest_server_notice_excerpt_label = Gtk.Label(label="")
+        self.latest_server_notice_excerpt_label.set_xalign(0)
+        self.latest_server_notice_excerpt_label.set_wrap(True)
+        box.append(self.latest_server_notice_excerpt_label)
+
+        self.latest_server_notice_button.set_child(box)
+        group.add(self.latest_server_notice_button)
+        return group
 
     def build_vanadiel_time_card(self):
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -535,6 +642,9 @@ class HorizonWindow(Adw.Application):
         return self.get_vanadiel_moon_state(moon_raw_percent)["icon"]
 
     def update_vanadiel_time(self):
+        if self.app_closing:
+            return False
+
         if not self.vana_time_label or not self.vana_day_label or not self.vana_moon_label:
             return True
 
@@ -628,6 +738,15 @@ class HorizonWindow(Adw.Application):
         self.news_status_label.set_margin_bottom(6)
         news_group.add(self.news_status_label)
 
+        self.news_filter_box = Gtk.FlowBox()
+        self.news_filter_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.news_filter_box.set_max_children_per_line(3)
+        self.news_filter_box.set_row_spacing(6)
+        self.news_filter_box.set_column_spacing(6)
+        self.news_filter_box.set_margin_bottom(6)
+        news_group.add(self.news_filter_box)
+        self.render_news_filters()
+
         news_scrolled = Gtk.ScrolledWindow()
         news_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         news_scrolled.set_min_content_height(360)
@@ -659,6 +778,9 @@ class HorizonWindow(Adw.Application):
         self.friends_status_label = Gtk.Label(label="Loading friends...")
         self.friends_status_label.add_css_class("dim-label")
         self.friends_status_label.set_xalign(0)
+        self.friends_status_label.set_wrap(False)
+        self.friends_status_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.friends_status_label.set_max_width_chars(42)
         self.friends_status_label.set_margin_top(6)
         self.friends_status_label.set_margin_bottom(6)
         friends_group.add(self.friends_status_label)
@@ -679,23 +801,38 @@ class HorizonWindow(Adw.Application):
         friends_group.add(friends_scrolled)
         friends_box.append(friends_group)
 
-        GLib.idle_add(self.render_friends)
         return page
 
     def refresh_yells_async(self):
+        if self.app_closing:
+            return False
+
         thread = threading.Thread(target=self.fetch_yells, daemon=True)
         thread.start()
         return True
 
     def refresh_news_async(self):
+        if self.app_closing:
+            return False
+
         thread = threading.Thread(target=self.fetch_news, daemon=True)
         thread.start()
         return True
 
     def fetch_json_url(self, url, timeout=10):
+        # Use browser-like headers. The Horizon API can be sensitive to frequent
+        # scripted requests, and a generic custom user-agent appears more likely
+        # to get rate-limited than a normal browser-style request.
         request = urllib.request.Request(
             url,
-            headers={"User-Agent": "HorizonXI-Linux-Launcher/0.2"},
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "HorizonXI-Launcher/0.4"
+                ),
+                "Accept": "application/json,text/plain,*/*",
+            },
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -725,7 +862,7 @@ class HorizonWindow(Adw.Application):
             child = next_child
 
     def apply_yells(self, payload):
-        if not self.yells_rows_box:
+        if self.app_closing or not self.yells_rows_box:
             return False
 
         self.clear_box_children(self.yells_rows_box)
@@ -751,12 +888,22 @@ class HorizonWindow(Adw.Application):
         return False
 
     def apply_yells_error(self, error_message):
+        if self.app_closing:
+            return False
+
         if self.yells_status_label:
-            self.yells_status_label.set_text(f"Could not load yells: {error_message}")
+            if self.yells_rows_box and self.yells_rows_box.get_first_child() is not None:
+                self.yells_status_label.set_text(
+                    f"Could not refresh yells: {error_message}. Showing previously loaded yells."
+                )
+            else:
+                self.yells_status_label.set_text(
+                    f"Could not load yells: {error_message}. Retrying automatically..."
+                )
 
-        if self.yells_rows_box:
-            self.clear_box_children(self.yells_rows_box)
-
+        # Do not clear existing yell rows on temporary API failures such as
+        # HTTP 429/rate limits, timeouts, or server errors. Keeping the previous
+        # successful data avoids the Community tab turning into an empty panel.
         return False
 
     def create_yell_row(self, yell):
@@ -796,56 +943,230 @@ class HorizonWindow(Adw.Application):
         return row
 
     def apply_news(self, payload):
-        if not self.news_rows_box:
+        if self.app_closing or not self.news_rows_box:
             return False
-
-        self.clear_box_children(self.news_rows_box)
 
         if not isinstance(payload, list):
             self.apply_news_error("Unexpected news response.")
             return False
 
-        articles = payload[:12]
+        self.news_articles = [article for article in payload if isinstance(article, dict)]
+        self.news_categories = self.extract_news_categories(self.news_articles)
+
+        valid_categories = {category for category, _label in self.news_categories}
+        if self.news_selected_category != NEWS_CATEGORY_ALL and self.news_selected_category not in valid_categories:
+            self.news_selected_category = NEWS_CATEGORY_ALL
+
+        self.update_latest_server_notice(self.news_articles)
+        self.render_news_filters()
+        self.render_news()
+
+        return False
+
+    def apply_news_error(self, error_message):
+        if self.app_closing:
+            return False
 
         if self.news_status_label:
-            self.news_status_label.set_text(f"Showing latest {len(articles)} articles.")
+            if self.news_rows_box and self.news_rows_box.get_first_child() is not None:
+                self.news_status_label.set_text(
+                    f"Could not refresh news: {error_message}. Showing previously loaded news."
+                )
+            else:
+                self.news_status_label.set_text(
+                    f"Could not load news: {error_message}. Retrying automatically..."
+                )
+
+        # Keep previously loaded news visible when a refresh fails.
+        return False
+
+    def extract_news_categories(self, articles):
+        seen = set()
+        categories = []
+
+        # Keep the website-style filters visible even if the latest JSON page
+        # currently has no entries for one of these categories.
+        for category, label in NEWS_DEFAULT_CATEGORIES:
+            seen.add(category)
+            categories.append((category, label))
+
+        for article in articles:
+            category = self.get_news_category(article)
+            if not category or category in seen:
+                continue
+
+            seen.add(category)
+            categories.append((category, self.get_news_category_label(article)))
+
+        return categories
+
+    def render_news_filters(self):
+        if not self.news_filter_box:
+            return
+
+        self.clear_box_children(self.news_filter_box)
+        self.news_filter_buttons = {}
+
+        filters = [(NEWS_CATEGORY_ALL, "All")] + list(self.news_categories or NEWS_DEFAULT_CATEGORIES)
+
+        for category, label in filters:
+            button = Gtk.Button(label=label)
+            button.set_valign(Gtk.Align.CENTER)
+            button.connect("clicked", self.on_news_filter_clicked, category)
+            if category == self.news_selected_category:
+                button.add_css_class("suggested-action")
+            self.news_filter_buttons[category] = button
+            self.news_filter_box.append(button)
+
+    def on_news_filter_clicked(self, button, category):
+        self.news_selected_category = category or NEWS_CATEGORY_ALL
+        self.render_news_filters()
+        self.render_news()
+
+    def render_news(self):
+        if not self.news_rows_box:
+            return
+
+        self.clear_box_children(self.news_rows_box)
+
+        if not self.news_articles:
+            if self.news_status_label:
+                self.news_status_label.set_text("No news articles loaded yet.")
+            return
+
+        if self.news_selected_category == NEWS_CATEGORY_ALL:
+            articles = self.news_articles[:12]
+            filter_label = "All"
+        else:
+            articles = [
+                article for article in self.news_articles
+                if self.get_news_category(article) == self.news_selected_category
+            ][:12]
+            filter_label = self.get_news_filter_label(self.news_selected_category)
+
+        if self.news_status_label:
+            if articles:
+                self.news_status_label.set_text(f"Showing latest {len(articles)} {filter_label.lower()} articles.")
+            else:
+                self.news_status_label.set_text(f"No {filter_label.lower()} articles in the current feed.")
+
+        if not articles:
+            empty_label = Gtk.Label(label="No articles found for this filter.")
+            empty_label.add_css_class("dim-label")
+            empty_label.set_wrap(True)
+            empty_label.set_xalign(0)
+            self.news_rows_box.append(empty_label)
+            return
 
         for article in articles:
             row = self.create_news_row(article)
             self.news_rows_box.append(row)
 
-        return False
+    def get_news_category(self, article):
+        if not isinstance(article, dict):
+            return ""
 
-    def apply_news_error(self, error_message):
-        if self.news_status_label:
-            self.news_status_label.set_text(f"Could not load news: {error_message}")
+        category = str(article.get("category", "")).strip()
+        if category:
+            return category
 
-        if self.news_rows_box:
-            self.clear_box_children(self.news_rows_box)
+        label = str(article.get("categoryLabel", "")).strip().lower()
+        return label.replace("&", "and").replace(" ", "-")
 
-        return False
+    def get_news_category_label(self, article):
+        if not isinstance(article, dict):
+            return "News"
+
+        label = str(article.get("categoryLabel", "")).strip()
+        if label:
+            return label
+
+        category = self.get_news_category(article)
+        if category:
+            return category.replace("-", " ").title()
+
+        return "News"
+
+    def get_news_filter_label(self, category):
+        if category == NEWS_CATEGORY_ALL:
+            return "All"
+
+        for filter_category, label in self.news_categories or NEWS_DEFAULT_CATEGORIES:
+            if filter_category == category:
+                return label
+
+        return str(category).replace("-", " ").title()
+
+    def get_news_article_url(self, article):
+        slug = article.get("slug", None) if isinstance(article, dict) else None
+        if slug:
+            return f"https://horizonxi.com/news/{slug}"
+        return "https://horizonxi.com/news"
+
+    def get_news_article_title(self, article):
+        if isinstance(article, dict):
+            return str(article.get("title", "Untitled")).strip() or "Untitled"
+        return str(article)
+
+    def update_latest_server_notice(self, articles):
+        latest_notice = None
+
+        for article in articles:
+            if self.get_news_category(article) == NEWS_SERVER_NOTICE_CATEGORY:
+                latest_notice = article
+                break
+
+        if not self.latest_server_notice_title_label:
+            return
+
+        if not latest_notice:
+            self.latest_server_notice_url = "https://horizonxi.com/news"
+            self.latest_server_notice_title_label.set_text("No server notices found.")
+            self.latest_server_notice_meta_label.set_text("Checking the official news feed automatically.")
+            self.latest_server_notice_excerpt_label.set_text("")
+            if self.latest_server_notice_button:
+                self.latest_server_notice_button.set_sensitive(False)
+            return
+
+        title = self.get_news_article_title(latest_notice)
+        excerpt = str(latest_notice.get("excerpt", "")).strip()
+        category_label = self.get_news_category_label(latest_notice)
+        author = str(latest_notice.get("author", "")).strip()
+        timestamp = self.format_news_datetime(latest_notice.get("date", None))
+        if not timestamp:
+            timestamp = str(latest_notice.get("printDate", "")).strip()
+
+        meta_parts = [part for part in (category_label, timestamp, author) if part]
+        self.latest_server_notice_url = self.get_news_article_url(latest_notice)
+        self.latest_server_notice_title_label.set_text(title)
+        self.latest_server_notice_meta_label.set_text("  •  ".join(meta_parts))
+        self.latest_server_notice_excerpt_label.set_text(excerpt)
+
+        if self.latest_server_notice_button:
+            self.latest_server_notice_button.set_sensitive(True)
+
+    def on_latest_server_notice_clicked(self, button):
+        self.on_open_link_clicked(button, self.latest_server_notice_url)
 
     def create_news_row(self, article):
         title = "Untitled"
         excerpt = ""
         print_date = ""
         reading_time = ""
-        slug = None
+        category_label = ""
 
         if isinstance(article, dict):
-            title = str(article.get("title", "Untitled"))
+            title = self.get_news_article_title(article)
             excerpt = str(article.get("excerpt", ""))
             print_date = str(article.get("printDate", ""))
             reading_time = str(article.get("printReadingTime", article.get("readingTime", "")))
-            slug = article.get("slug", None)
+            category_label = self.get_news_category_label(article)
             if not print_date:
                 print_date = self.format_news_date(article.get("date", None))
         else:
             title = str(article)
 
-        url = "https://horizonxi.com/news"
-        if slug:
-            url = f"https://horizonxi.com/news/{slug}"
+        url = self.get_news_article_url(article if isinstance(article, dict) else {})
 
         button = Gtk.Button()
         button.set_halign(Gtk.Align.FILL)
@@ -863,7 +1184,7 @@ class HorizonWindow(Adw.Application):
         title_label.set_wrap(True)
         box.append(title_label)
 
-        meta_parts = [part for part in (print_date, reading_time) if part]
+        meta_parts = [part for part in (category_label, print_date, reading_time) if part]
         if meta_parts:
             meta = Gtk.Label(label="  •  ".join(meta_parts))
             meta.add_css_class("dim-label")
@@ -907,9 +1228,25 @@ class HorizonWindow(Adw.Application):
             except Exception:
                 return str(value)
 
+    def format_news_datetime(self, value):
+        if not value:
+            return ""
+
+        try:
+            clean_value = str(value).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(clean_value)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone()
+            return dt.strftime("%B %-d, %Y %H:%M")
+        except Exception:
+            return self.format_news_date(value)
+
     def load_friends(self):
         self.friend_names = []
         self.previous_friend_online_states = None
+        self.characters_cache = []
+        self.characters_by_name = {}
+
         try:
             if FRIENDS_FILE.exists():
                 data = json.loads(FRIENDS_FILE.read_text(encoding="utf-8"))
@@ -919,6 +1256,25 @@ class HorizonWindow(Adw.Application):
             print(f"Failed to load friends: {error}")
             self.friend_names = []
 
+        # Load last known character data so the Friends panel has useful data
+        # immediately on startup, instead of briefly looking broken while the
+        # first network refresh is still running.
+        try:
+            if FRIENDS_CACHE_FILE.exists():
+                cache_payload = json.loads(FRIENDS_CACHE_FILE.read_text(encoding="utf-8"))
+                cached_characters = cache_payload.get("characters", {}) if isinstance(cache_payload, dict) else {}
+                if isinstance(cached_characters, dict):
+                    for friend_name in self.friend_names:
+                        key = friend_name.lower()
+                        character = cached_characters.get(key)
+                        if isinstance(character, dict):
+                            self.characters_by_name[key] = character
+
+                    self.characters_cache = list(self.characters_by_name.values())
+                    self.friends_loaded_once = bool(self.characters_by_name)
+        except Exception as error:
+            print(f"Failed to load friends cache: {error}")
+
     def save_friends(self):
         try:
             DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -926,24 +1282,123 @@ class HorizonWindow(Adw.Application):
         except Exception as error:
             print(f"Failed to save friends: {error}")
 
+    def save_friends_cache(self):
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            cached = {}
+            for friend_name in self.friend_names:
+                key = friend_name.lower()
+                character = self.characters_by_name.get(key)
+                if isinstance(character, dict):
+                    cached[key] = character
+
+            FRIENDS_CACHE_FILE.write_text(
+                json.dumps({"characters": cached}, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except Exception as error:
+            print(f"Failed to save friends cache: {error}")
+
     def refresh_friends_async(self):
+        if self.app_closing:
+            return False
+
+        """Refresh the friend list without making the UI flap.
+
+        This deliberately keeps the logic simple:
+        - direct /api/v1/chars/<name> lookups only
+        - refresh every 30 seconds
+        - no overlapping refreshes
+        - keep previous/cached data if a request fails
+        """
+        if self.friends_refresh_in_progress:
+            return True
+
+        self.friends_refresh_in_progress = True
+        self.friends_last_error = None
+
+        if self.friends_status_label:
+            if not self.friend_names:
+                self.friends_status_label.set_text("No friends added yet.")
+            elif self.characters_by_name:
+                self.friends_status_label.set_text("Refreshing friends...")
+            else:
+                self.friends_status_label.set_text(f"Checking {len(self.friend_names)} friends...")
+
+        if not self.characters_by_name:
+            GLib.idle_add(self.render_friends)
+
         thread = threading.Thread(target=self.fetch_friends_data, daemon=True)
         thread.start()
         return True
 
     def fetch_friends_data(self):
+        if self.app_closing:
+            return
+
         try:
-            characters = []
+            friend_names = list(self.friend_names)
+            previous_by_name = dict(self.characters_by_name)
 
-            # /api/v1/chars only appears to contain online characters, so it is not
-            # reliable for validating or refreshing offline friends. Fetch each
-            # followed character directly instead.
-            for friend_name in list(self.friend_names):
-                character = self.fetch_character_by_name(friend_name)
-                if character:
-                    characters.append(character)
+            if not friend_names:
+                GLib.idle_add(self.apply_friends_data, {}, 0, 0, [])
+                return
 
-            GLib.idle_add(self.apply_friends_data, characters)
+            fetched_by_name = {}
+            refreshed_keys = set()
+            failed_count = 0
+
+            def fetch_one(friend_name):
+                try:
+                    character = self.fetch_character_by_name(friend_name, timeout=8)
+                    return friend_name, character, None
+                except Exception as error:
+                    return friend_name, None, error
+
+            # Keep this conservative. The API responds quickly in a browser, but
+            # hammering it with too many simultaneous requests can cause 429s or
+            # flapping. Three workers keeps startup fast while being gentle.
+            max_workers = min(3, max(1, len(friend_names)))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(fetch_one, friend_name) for friend_name in friend_names]
+
+                for future in concurrent.futures.as_completed(futures):
+                    friend_name, character, error = future.result()
+                    key = friend_name.lower()
+
+                    if error is not None:
+                        failed_count += 1
+                        print(f"Failed to refresh friend {friend_name}: {error}")
+                        continue
+
+                    if isinstance(character, dict):
+                        # Store by the followed name, not only the canonical
+                        # character name, so saved names always map correctly.
+                        fetched_by_name[key] = character
+                        refreshed_keys.add(key)
+                    else:
+                        failed_count += 1
+
+            # Merge successful new data with previous cached data. A failed
+            # request should never erase a friend row or mark someone offline.
+            merged_by_name = {}
+            for friend_name in friend_names:
+                key = friend_name.lower()
+                if key in fetched_by_name:
+                    merged_by_name[key] = fetched_by_name[key]
+                elif key in previous_by_name:
+                    merged_by_name[key] = previous_by_name[key]
+
+            if self.app_closing:
+                return
+
+            GLib.idle_add(
+                self.apply_friends_data,
+                merged_by_name,
+                len(fetched_by_name),
+                failed_count,
+                sorted(refreshed_keys),
+            )
         except Exception as error:
             GLib.idle_add(self.apply_friends_error, str(error))
 
@@ -990,23 +1445,59 @@ class HorizonWindow(Adw.Application):
 
         return []
 
-    def apply_friends_data(self, characters):
-        self.characters_cache = characters
-        self.characters_by_name = {}
+    def apply_friends_data(self, characters_by_name, success_count=0, failed_count=0, refreshed_keys=None):
+        if self.app_closing:
+            return False
 
-        for character in characters:
-            name = self.get_character_name(character)
-            if name:
-                self.characters_by_name[name.lower()] = character
+        self.friends_refresh_in_progress = False
 
-        self.check_friend_online_notifications()
+        if isinstance(characters_by_name, dict):
+            self.characters_by_name = {
+                str(key).lower(): value
+                for key, value in characters_by_name.items()
+                if isinstance(value, dict)
+            }
+            self.characters_cache = list(self.characters_by_name.values())
+        else:
+            # Backwards-compatible fallback for older call sites.
+            self.characters_cache = characters_by_name or []
+            self.characters_by_name = {}
+            for character in self.characters_cache:
+                name = self.get_character_name(character)
+                if name:
+                    self.characters_by_name[name.lower()] = character
+
+        if self.characters_by_name:
+            self.friends_loaded_once = True
+            self.save_friends_cache()
+
+        self.friends_last_error = None
+        if failed_count:
+            self.friends_last_error = f"{failed_count} friends could not refresh"
+
+        self.check_friend_online_notifications(refreshed_keys)
         self.render_friends()
         return False
 
     def apply_friends_error(self, error_message):
+        if self.app_closing:
+            return False
+
+        self.friends_refresh_in_progress = False
+        self.friends_last_error = str(error_message)
+
         if self.friends_status_label:
-            self.friends_status_label.set_text(f"Could not refresh friends: {error_message}")
-        self.render_friends()
+            if self.characters_by_name:
+                self.friends_status_label.set_text("Could not refresh friends. Showing previous data.")
+            else:
+                self.friends_status_label.set_text("Could not load friends. Retrying...")
+
+        # Keep whatever is currently visible. Only render if there was no data
+        # yet, so the user sees a stable "Checking/Unknown" state rather than an
+        # empty or broken-looking list.
+        if not self.characters_by_name:
+            self.render_friends()
+
         return False
 
     def get_friend_online_sound_file(self):
@@ -1021,31 +1512,58 @@ class HorizonWindow(Adw.Application):
         for friend_name in self.friend_names:
             friend_key = friend_name.lower()
             character = self.characters_by_name.get(friend_key)
-            states[friend_key] = bool(character and self.get_character_online(character))
+            if character:
+                states[friend_key] = bool(self.get_character_online(character))
+            else:
+                states[friend_key] = None
 
         return states
 
-    def check_friend_online_notifications(self):
+    def check_friend_online_notifications(self, refreshed_keys=None):
+        if self.app_closing:
+            return
+
         current_states = self.get_current_friend_online_states()
 
-        # First completed refresh establishes the baseline silently.
-        # Later refreshes ding once if one or more friends changed from
-        # not-online to online, even if the total online count stayed the same.
+        if refreshed_keys is None:
+            refreshed_keys = set(current_states.keys())
+        else:
+            refreshed_keys = {
+                str(friend_key).lower()
+                for friend_key in refreshed_keys
+                if str(friend_key).strip()
+            }
+
+        # First successful refresh establishes the notification baseline silently.
+        # Cached startup data is intentionally not enough to trigger the ding.
         if self.previous_friend_online_states is None:
-            self.previous_friend_online_states = current_states
+            self.previous_friend_online_states = {}
+            for friend_key in refreshed_keys:
+                state = current_states.get(friend_key)
+                if state is not None:
+                    self.previous_friend_online_states[friend_key] = state
             return
 
         any_newly_online = any(
-            is_online and not self.previous_friend_online_states.get(friend_key, False)
-            for friend_key, is_online in current_states.items()
+            current_states.get(friend_key) is True
+            and self.previous_friend_online_states.get(friend_key) is False
+            for friend_key in refreshed_keys
         )
 
-        self.previous_friend_online_states = current_states
+        # Only update the baseline for friends that actually refreshed. Failed
+        # requests and cached rows do not count as new offline/online evidence.
+        for friend_key in refreshed_keys:
+            state = current_states.get(friend_key)
+            if state is not None:
+                self.previous_friend_online_states[friend_key] = state
 
         if any_newly_online:
             self.play_friend_online_sound()
 
     def play_friend_online_sound(self):
+        if self.app_closing:
+            return
+
         sound_file = self.get_friend_online_sound_file()
 
         if not sound_file.exists():
@@ -1054,6 +1572,11 @@ class HorizonWindow(Adw.Application):
 
         # Prefer simple PipeWire/PulseAudio CLI playback when available. This has
         # proven more reliable than Gtk.MediaFile on some desktops/runtimes.
+        self.friend_sound_processes = [
+            process for process in self.friend_sound_processes
+            if process.poll() is None
+        ]
+
         for command in ("pw-play", "paplay", "gst-play-1.0"):
             player = shutil.which(command)
             if not player:
@@ -1061,17 +1584,18 @@ class HorizonWindow(Adw.Application):
 
             try:
                 if command == "gst-play-1.0":
-                    subprocess.Popen(
+                    process = subprocess.Popen(
                         [player, "--no-interactive", str(sound_file)],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
                 else:
-                    subprocess.Popen(
+                    process = subprocess.Popen(
                         [player, str(sound_file)],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
+                self.friend_sound_processes.append(process)
                 return
             except Exception as error:
                 print(f"Failed to play friend online sound with {command}: {error}")
@@ -1092,6 +1616,9 @@ class HorizonWindow(Adw.Application):
                 display.beep()
 
     def render_friends(self):
+        if self.app_closing:
+            return False
+
         if not self.friends_rows_box:
             return False
 
@@ -1108,31 +1635,44 @@ class HorizonWindow(Adw.Application):
             self.friends_rows_box.append(empty_label)
             return False
 
+        loading_without_data = self.friends_refresh_in_progress and not self.characters_by_name
+
         friend_entries = []
         online_count = 0
+        known_count = 0
 
         for friend_name in self.friend_names:
-            character = self.characters_by_name.get(friend_name.lower())
+            key = friend_name.lower()
+            character = self.characters_by_name.get(key)
             is_online = bool(character and self.get_character_online(character))
 
+            if character:
+                known_count += 1
             if is_online:
                 online_count += 1
 
-            display_name = friend_name
-            if character:
-                display_name = self.get_character_name(character) or friend_name
+            display_name = self.get_character_name(character) if character else ""
+            if not display_name:
+                display_name = friend_name
 
             friend_entries.append((friend_name, character, display_name, is_online))
 
         friend_entries.sort(
             key=lambda entry: (
                 0 if entry[3] else 1,
+                0 if entry[1] else 1,
                 entry[2].lower(),
             )
         )
 
         for index, (friend_name, character, _display_name, _is_online) in enumerate(friend_entries):
-            self.friends_rows_box.append(self.create_friend_row(friend_name, character))
+            self.friends_rows_box.append(
+                self.create_friend_row(
+                    friend_name,
+                    character,
+                    loading=loading_without_data,
+                )
+            )
 
             if index < len(friend_entries) - 1:
                 separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
@@ -1140,11 +1680,14 @@ class HorizonWindow(Adw.Application):
                 self.friends_rows_box.append(separator)
 
         if self.friends_status_label:
-            self.friends_status_label.set_text(f"{online_count}/{len(self.friend_names)} friends online.")
+            if loading_without_data:
+                self.friends_status_label.set_text(f"Checking {len(self.friend_names)} friends...")
+            else:
+                self.friends_status_label.set_text(f"{online_count}/{len(self.friend_names)} friends online.")
 
         return False
 
-    def create_friend_row(self, friend_name, character):
+    def create_friend_row(self, friend_name, character, loading=False, load_failed=False):
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         row.add_css_class("friend-row")
         row.set_margin_top(0)
@@ -1157,19 +1700,27 @@ class HorizonWindow(Adw.Application):
         info_box.set_valign(Gtk.Align.CENTER)
 
         display_name = friend_name
-        online = False
-        job_string = "Unknown job"
+        job_string = "Waiting for data"
+        status_word = "Unknown"
+        status_dot_color = "#64748b"
+        status_word_color = "#9ca3af"
 
         if character:
             display_name = self.get_character_name(character) or friend_name
             online = self.get_character_online(character)
             job_string = self.get_character_jobstring(character)
-        elif self.characters_by_name:
-            job_string = "Character not found"
 
-        status_dot_color = "#6aa84f" if online else "#4b5563"
-        status_word = "Online" if online else "Offline"
-        status_word_color = "#6aa84f" if online else "#9ca3af"
+            if online:
+                status_word = "Online"
+                status_dot_color = "#6aa84f"
+                status_word_color = "#6aa84f"
+            else:
+                status_word = "Offline"
+                status_dot_color = "#4b5563"
+                status_word_color = "#9ca3af"
+        elif loading:
+            status_word = "Checking"
+            job_string = "Fetching status"
 
         name_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         name_row.set_halign(Gtk.Align.FILL)
@@ -1184,7 +1735,9 @@ class HorizonWindow(Adw.Application):
         name_label = Gtk.Label()
         name_label.set_markup(f"<b>{html.escape(display_name)}</b>")
         name_label.set_xalign(0)
-        name_label.set_wrap(True)
+        name_label.set_wrap(False)
+        name_label.set_ellipsize(Pango.EllipsizeMode.END)
+        name_label.set_max_width_chars(24)
         name_label.set_hexpand(True)
         name_row.append(name_label)
         info_box.append(name_row)
@@ -1195,7 +1748,9 @@ class HorizonWindow(Adw.Application):
             f' <span foreground="#9ca3af">• {html.escape(job_string)}</span>'
         )
         detail_label.set_xalign(0)
-        detail_label.set_wrap(True)
+        detail_label.set_wrap(False)
+        detail_label.set_ellipsize(Pango.EllipsizeMode.END)
+        detail_label.set_max_width_chars(32)
         info_box.append(detail_label)
 
         remove_button = Gtk.Button(label="Remove")
@@ -1316,14 +1871,21 @@ class HorizonWindow(Adw.Application):
         self.friend_names.append(canonical_name)
         self.friend_names.sort(key=str.lower)
         self.characters_by_name[canonical_name.lower()] = character
+        if self.previous_friend_online_states is not None:
+            self.previous_friend_online_states[canonical_name.lower()] = bool(self.get_character_online(character))
         self.save_friends()
+        self.save_friends_cache()
         self.show_friend_message(f"Added {canonical_name}.")
         self.render_friends()
         return False
 
     def on_remove_friend_clicked(self, button, friend_name):
         self.friend_names = [name for name in self.friend_names if name.lower() != friend_name.lower()]
+        self.characters_by_name.pop(friend_name.lower(), None)
+        if self.previous_friend_online_states is not None:
+            self.previous_friend_online_states.pop(friend_name.lower(), None)
         self.save_friends()
+        self.save_friends_cache()
         self.show_friend_message(f"Removed {friend_name}.")
         self.render_friends()
 
@@ -1873,9 +2435,15 @@ class HorizonWindow(Adw.Application):
         install_box.append(self.experimental_install_button)
         experimental_group.add(install_box)
 
+        self.experimental_progress_bar = Gtk.ProgressBar()
+        self.experimental_progress_bar.set_show_text(True)
+        self.experimental_progress_bar.set_text("Idle")
+        self.experimental_progress_bar.set_fraction(0.0)
+        experimental_group.add(self.experimental_progress_bar)
+
         self.experimental_enable_switch = Adw.SwitchRow(title="Enable Experimental Performance Mode")
         self.experimental_enable_switch.set_subtitle(
-            "When enabled, direct launch uses Proton-CachyOS with DXVK D3D8 and a 60 FPS frame cap."
+            "When enabled, direct launch uses GE-Proton10-34 with DXVK D3D8 and a 60 FPS frame cap."
         )
         self.experimental_enable_switch.connect("notify::active", self.on_experimental_enabled_toggled)
         experimental_group.add(self.experimental_enable_switch)
@@ -1898,11 +2466,12 @@ class HorizonWindow(Adw.Application):
         details = Gtk.Label(
             label=(
                 "Enabled mode uses:\n"
-                "• Proton-CachyOS instead of GE-Proton7-42\n"
+                "• GE-Proton10-34 instead of GE-Proton7-42\n"
                 "• PROTON_DXVK_D3D8=1\n"
                 "• DXVK_FRAME_RATE=60\n"
                 "• MESA_VK_WSI_PRESENT_MODE=fifo\n\n"
-                "Install also runs winetricks for allfonts, corefonts, and gdiplus in the existing game prefix."
+                "Install also tries optional protontricks components for allfonts, corefonts, and gdiplus.\n"
+                "If those optional components fail, GE-Proton10-34 can still be installed."
             )
         )
         details.set_wrap(True)
@@ -2249,10 +2818,10 @@ class HorizonWindow(Adw.Application):
 
         if self.experimental_performance_enabled:
             if self.proton.is_experimental_installed():
-                self.proton_status.set_title("Proton-CachyOS")
+                self.proton_status.set_title("GE-Proton10-34")
                 self.proton_status.set_subtitle("✅ Experimental mode enabled")
             else:
-                self.proton_status.set_title("Proton-CachyOS")
+                self.proton_status.set_title("GE-Proton10-34")
                 self.proton_status.set_subtitle("❌ Experimental mode enabled but missing")
         else:
             self.proton_status.set_title("Proton GE 7-42")
@@ -2385,6 +2954,15 @@ class HorizonWindow(Adw.Application):
 
             self.progress_bar.set_text(message)
 
+        if self.experimental_progress_bar:
+            if fraction is None:
+                self.experimental_progress_bar.pulse()
+            else:
+                safe_fraction = max(0.0, min(1.0, float(fraction)))
+                self.experimental_progress_bar.set_fraction(safe_fraction)
+
+            self.experimental_progress_bar.set_text(message)
+
         return False
 
     def load_experimental_settings(self):
@@ -2443,6 +3021,12 @@ class HorizonWindow(Adw.Application):
 
         if self.experimental_install_button:
             self.experimental_install_button.set_sensitive(not self.operation_in_progress)
+            if self.operation_in_progress:
+                self.experimental_install_button.set_label("Installing Experimental Performance Mode...")
+            elif installed:
+                self.experimental_install_button.set_label("Reinstall Experimental Performance Mode")
+            else:
+                self.experimental_install_button.set_label("Install Experimental Performance Mode")
 
     def on_experimental_enabled_toggled(self, row, pspec):
         if self.loading_experimental_settings:
@@ -2477,6 +3061,7 @@ class HorizonWindow(Adw.Application):
             return
 
         self.set_operation_in_progress(True)
+        self.refresh_experimental_status()
         self.update_progress("Installing Experimental Performance Mode...", 0.0)
 
         def progress(message, fraction=None):
@@ -2484,11 +3069,20 @@ class HorizonWindow(Adw.Application):
 
         def install_worker():
             try:
-                self.proton.install_experimental(progress)
+                result = self.proton.install_experimental(progress)
+                warnings = []
+                if isinstance(result, dict):
+                    warnings = result.get("warnings") or []
+
+                if warnings:
+                    message = "Experimental Performance Mode installed. Optional protontricks components failed."
+                else:
+                    message = "Experimental Performance Mode installed."
+
                 GLib.idle_add(
                     self.on_install_experimental_finished,
                     True,
-                    "Experimental Performance Mode installed.",
+                    message,
                 )
             except Exception as error:
                 GLib.idle_add(
@@ -2591,6 +3185,9 @@ class HorizonWindow(Adw.Application):
         )
 
     def refresh_server_status_async(self):
+        if self.app_closing:
+            return False
+
         thread = threading.Thread(target=self.fetch_server_status, daemon=True)
         thread.start()
         return True
@@ -2605,6 +3202,9 @@ class HorizonWindow(Adw.Application):
             GLib.idle_add(self.apply_server_status_error, str(error))
 
     def apply_server_status(self, payload):
+        if self.app_closing:
+            return False
+
         try:
             players = None
 
@@ -2634,6 +3234,9 @@ class HorizonWindow(Adw.Application):
         return False
 
     def apply_server_status_error(self, error_message):
+        if self.app_closing:
+            return False
+
         self.server_online = False
         self.players_online = None
 
@@ -2827,7 +3430,7 @@ class HorizonWindow(Adw.Application):
         experimental_mode = bool(self.experimental_performance_enabled)
 
         if experimental_mode and not self.proton.is_experimental_installed():
-            self.status_label.set_text("Experimental Performance Mode is enabled, but Proton-CachyOS is not installed.")
+            self.status_label.set_text("Experimental Performance Mode is enabled, but GE-Proton10-34 is not installed.")
             self.refresh_main_action_button()
             return
 

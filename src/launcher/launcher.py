@@ -122,7 +122,7 @@ class Launcher:
 
         if experimental_mode:
             if not self.proton.is_experimental_installed():
-                raise RuntimeError("Experimental Performance Mode is enabled, but Proton-CachyOS is not installed.")
+                raise RuntimeError("Experimental Performance Mode is enabled, but GE-Proton10-34 is not installed.")
 
             env["PROTONPATH"] = self.proton.get_experimental_path()
             env["PROTON_DXVK_D3D8"] = "1"

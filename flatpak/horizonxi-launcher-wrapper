@@ -1,3 +1,8 @@
 #!/usr/bin/env bash
-cd /app/share/horizonxi-launcher
-exec python3 src/main.py "$@"
+set -euo pipefail
+
+# Keep the app's process cwd on a host-visible path. If we leave cwd inside
+# /app/share/horizonxi-launcher, xdg-desktop-portal can fail when opening
+# links/folders because that path does not exist on the host side.
+cd "${HOME}"
+exec python3 /app/share/horizonxi-launcher/src/main.py "$@"
