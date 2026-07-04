@@ -1,5 +1,7 @@
 import html
 import json
+import shutil
+import subprocess
 import threading
 import urllib.request
 import urllib.parse
@@ -32,9 +34,9 @@ HORIZON_CHARS_URL = "https://api.horizonxi.com/api/v1/chars"
 HORIZON_CHAR_URL = "https://api.horizonxi.com/api/v1/chars/{name}"
 HORIZON_BAZAAR_URL = "https://api.horizonxi.com/api/v1/items/bazaar"
 
-YELLS_REFRESH_SECONDS = 15
+YELLS_REFRESH_SECONDS = 5
 NEWS_REFRESH_SECONDS = 1800
-FRIENDS_REFRESH_SECONDS = 60
+FRIENDS_REFRESH_SECONDS = 5
 
 VANA_EPOCH = datetime(2001, 12, 31, 15, 0, 0, tzinfo=timezone.utc)
 VANA_START_YEAR = 886
@@ -56,9 +58,35 @@ VANA_WEEKDAYS = (
     ("Darksday", "#a78bfa"),
 )
 
+VANA_WEEKDAY_ICONS = ("🔥", "🪨", "💧", "🍃", "❄️", "⚡", "✨", "🌑")
+
+# Ordered moon states from New Moon -> Waxing -> Full Moon -> Waning -> New Moon.
+# The duplicated phase names are intentional: some in-game activities care about
+# specific windows inside the broader visual phase, such as chocobo digging ore season.
+VANA_MOON_STATES = (
+    {"id": 1, "name": "New Moon", "side": "new", "min": 0, "max": 10, "icon": "🌑", "extra_icon": "🪣🎣", "event": ""},
+    {"id": 2, "name": "Waxing Crescent", "side": "waxing", "min": 7, "max": 21, "icon": "🌒", "extra_icon": "🪨", "event": ""},
+    {"id": 3, "name": "Waxing Crescent", "side": "waxing", "min": 24, "max": 38, "icon": "🌒", "extra_icon": None},
+    {"id": 4, "name": "First Quarter Moon", "side": "waxing", "min": 40, "max": 55, "icon": "🌓", "extra_icon": None},
+    {"id": 5, "name": "Waxing Gibbous", "side": "waxing", "min": 57, "max": 71, "icon": "🌔", "extra_icon": None},
+    {"id": 6, "name": "Waxing Gibbous", "side": "waxing", "min": 74, "max": 88, "icon": "🌔", "extra_icon": None},
+    {"id": 7, "name": "Full Moon", "side": "full", "min": 90, "max": 100, "icon": "🌕", "extra_icon": "🪣🎣", "event": ""},
+    {"id": 8, "name": "Waning Gibbous", "side": "waning", "min": 79, "max": 93, "icon": "🌖", "extra_icon": None},
+    {"id": 9, "name": "Waning Gibbous", "side": "waning", "min": 62, "max": 76, "icon": "🌖", "extra_icon": None},
+    {"id": 10, "name": "Last Quarter Moon", "side": "waning", "min": 43, "max": 60, "icon": "🌗", "extra_icon": None},
+    {"id": 11, "name": "Waning Crescent", "side": "waning", "min": 26, "max": 40, "icon": "🌘", "extra_icon": None},
+    {"id": 12, "name": "Waning Crescent", "side": "waning", "min": 12, "max": 24, "icon": "🌘", "extra_icon": None},
+)
+
 CREDENTIALS_FILE = DATA_DIR / "credentials.json"
 FRIENDS_FILE = DATA_DIR / "friends.json"
 EXPERIMENTAL_SETTINGS_FILE = DATA_DIR / "experimental-settings.json"
+
+APP_DIR = Path(__file__).resolve().parent
+FRIEND_ONLINE_SOUND_CANDIDATES = (
+    APP_DIR / "Sounds" / "drop_003.ogg",
+    Path.cwd() / "Sounds" / "drop_003.ogg",
+)
 
 MAIN_ACTION_INSTALL = "install"
 MAIN_ACTION_MAINTENANCE = "maintenance"
@@ -92,6 +120,7 @@ class HorizonWindow(Adw.Application):
         self.players_status = None
         self.vana_time_label = None
         self.vana_day_label = None
+        self.vana_moon_label = None
 
         self.settings_controls = {}
         self.settings_stack = None
@@ -130,6 +159,8 @@ class HorizonWindow(Adw.Application):
         self.friend_names = []
         self.characters_cache = []
         self.characters_by_name = {}
+        self.previous_friend_online_states = None
+        self.friend_online_sound = None
 
         self.server_online = False
         self.players_online = None
@@ -180,7 +211,8 @@ class HorizonWindow(Adw.Application):
         stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         stack.set_vhomogeneous(False)
         stack.set_hhomogeneous(False)
-        stack.set_vexpand(False)
+        stack.set_vexpand(True)
+        stack.set_hexpand(True)
 
         switcher = Gtk.StackSwitcher()
         switcher.set_stack(stack)
@@ -203,7 +235,7 @@ class HorizonWindow(Adw.Application):
 
         root_box.append(stack)
 
-        version_label = Gtk.Label(label="Version 0.3.0")
+        version_label = Gtk.Label(label="Version 0.4.0")
         version_label.add_css_class("dim-label")
         version_label.set_margin_top(2)
         root_box.append(version_label)
@@ -405,16 +437,7 @@ class HorizonWindow(Adw.Application):
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         card.add_css_class("vanatime-panel")
         card.set_halign(Gtk.Align.START)
-        card.set_size_request(210, -1)
-
-        title = Gtk.Label(label="Vana'diel Time")
-        title.add_css_class("heading")
-        title.set_xalign(0)
-        card.append(title)
-
-        divider = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
-        divider.add_css_class("vanatime-divider")
-        card.append(divider)
+        card.set_size_request(230, -1)
 
         self.vana_time_label = Gtk.Label(label="--:-- ~ ----—--—--")
         self.vana_time_label.set_xalign(0)
@@ -424,6 +447,10 @@ class HorizonWindow(Adw.Application):
         self.vana_day_label.set_xalign(0)
         self.vana_day_label.set_markup('<span foreground="#d946ef"><b>Loading...</b></span>')
         card.append(self.vana_day_label)
+
+        self.vana_moon_label = Gtk.Label(label="🌑 --% New Moon")
+        self.vana_moon_label.set_xalign(0)
+        card.append(self.vana_moon_label)
 
         return card
 
@@ -457,8 +484,8 @@ class HorizonWindow(Adw.Application):
         # aligned: without it, the moon percentage is consistently a few
         # Vana'diel days out even when the clock/date are correct.
         moon_raw_percent = self.get_vanadiel_moon_raw_percent(total_vana_days)
-        moon_percent = int(round(abs(moon_raw_percent)))
-        moon_icon = self.get_vanadiel_moon_icon(moon_raw_percent)
+        moon_percent = max(0, min(100, int(round(abs(moon_raw_percent)))))
+        moon_state = self.get_vanadiel_moon_state(moon_raw_percent)
 
         return {
             "year": int(year),
@@ -467,43 +494,73 @@ class HorizonWindow(Adw.Application):
             "hour": int(hour),
             "minute": int(minute),
             "weekday_index": int(weekday_index),
-            "moon_percent": max(0, min(100, moon_percent)),
-            "moon_icon": moon_icon,
+            "moon_percent": moon_percent,
+            "moon_icon": moon_state["icon"],
+            "moon_phase": moon_state["name"],
+            "moon_extra_icon": moon_state.get("extra_icon"),
+            "moon_event": moon_state.get("event"),
+            "moon_state_id": moon_state["id"],
         }
 
     def get_vanadiel_moon_raw_percent(self, total_vana_days):
         moon_value = (((int(total_vana_days) + 26) % VANA_MOON_CYCLE_DAYS) - (VANA_MOON_CYCLE_DAYS / 2))
         return (moon_value / (VANA_MOON_CYCLE_DAYS / 2)) * 100
 
-    def get_vanadiel_moon_icon(self, moon_raw_percent):
-        percent = abs(float(moon_raw_percent))
-        waxing = moon_raw_percent >= 0
+    def get_vanadiel_moon_state(self, moon_raw_percent):
+        raw = float(moon_raw_percent)
+        percent = abs(raw)
 
-        if percent < 7:
-            return "🌑"
         if percent >= 90:
-            return "🌕"
-        if percent < 40:
-            return "☽" if waxing else "☾"
-        if percent < 57:
-            return "🌓" if waxing else "🌗"
-        return "🌔" if waxing else "🌖"
+            side = "full"
+        elif percent <= 10:
+            side = "new"
+        elif raw >= 0:
+            side = "waxing"
+        else:
+            side = "waning"
+
+        candidates = [state for state in VANA_MOON_STATES if state["side"] == side]
+        for state in candidates:
+            if state["min"] <= percent <= state["max"]:
+                return state
+
+        # Percentages normally land on the exact listed windows, but this fallback
+        # keeps the label stable if rounding lands in a small gap between windows.
+        return min(
+            candidates or VANA_MOON_STATES,
+            key=lambda state: min(abs(percent - state["min"]), abs(percent - state["max"])),
+        )
+
+    def get_vanadiel_moon_icon(self, moon_raw_percent):
+        return self.get_vanadiel_moon_state(moon_raw_percent)["icon"]
 
     def update_vanadiel_time(self):
-        if not self.vana_time_label or not self.vana_day_label:
+        if not self.vana_time_label or not self.vana_day_label or not self.vana_moon_label:
             return True
 
         vana = self.get_vanadiel_datetime()
         day_name, day_color = VANA_WEEKDAYS[vana["weekday_index"]]
+        day_icon = VANA_WEEKDAY_ICONS[vana["weekday_index"]]
+        moon_extra_icon = vana.get("moon_extra_icon") or ""
+        moon_event = vana.get("moon_event")
 
         self.vana_time_label.set_text(
-            f'{vana["hour"]:02d}:{vana["minute"]:02d} ~ '
+            f'🕰️ {vana["hour"]:02d}:{vana["minute"]:02d} ~ '
             f'{vana["year"]}-{vana["month"]}-{vana["day"]}'
         )
         self.vana_day_label.set_markup(
+            f'{html.escape(day_icon)} '
             f'<span foreground="{day_color}"><b>{html.escape(day_name)}</b></span>'
-            f'  {html.escape(vana["moon_icon"])} {vana["moon_percent"]}%'
         )
+
+        moon_text = (
+            f'{vana["moon_icon"]} {moon_extra_icon} {vana["moon_percent"]}% '
+            f'{vana["moon_phase"]}'
+        )
+        if moon_event:
+            moon_text += f' ({moon_event})'
+
+        self.vana_moon_label.set_text(" ".join(moon_text.split()))
 
         return True
 
@@ -519,6 +576,10 @@ class HorizonWindow(Adw.Application):
         yells_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         news_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         friends_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+
+        for column in (yells_box, news_box, friends_box):
+            column.set_vexpand(True)
+
         page.append(yells_box)
         page.append(news_box)
         page.append(friends_box)
@@ -529,6 +590,7 @@ class HorizonWindow(Adw.Application):
         yells_group = Adw.PreferencesGroup(
             description="Recent in-game yells from HorizonXI. Refreshes frequently.",
         )
+        yells_group.set_vexpand(True)
 
         self.yells_status_label = Gtk.Label(label="Loading yells...")
         self.yells_status_label.add_css_class("dim-label")
@@ -558,6 +620,7 @@ class HorizonWindow(Adw.Application):
         news_group = Adw.PreferencesGroup(
             description="Latest articles from HorizonXI. Click an article to open it in your browser.",
         )
+        news_group.set_vexpand(True)
 
         self.news_status_label = Gtk.Label(label="Loading news...")
         self.news_status_label.add_css_class("dim-label")
@@ -586,6 +649,7 @@ class HorizonWindow(Adw.Application):
         friends_group = Adw.PreferencesGroup(
             description="Follow characters by name. This list is local to your launcher.",
         )
+        friends_group.set_vexpand(True)
 
         add_friend_button = Gtk.Button(label="Add Friend")
         add_friend_button.add_css_class("suggested-action")
@@ -845,6 +909,7 @@ class HorizonWindow(Adw.Application):
 
     def load_friends(self):
         self.friend_names = []
+        self.previous_friend_online_states = None
         try:
             if FRIENDS_FILE.exists():
                 data = json.loads(FRIENDS_FILE.read_text(encoding="utf-8"))
@@ -934,6 +999,7 @@ class HorizonWindow(Adw.Application):
             if name:
                 self.characters_by_name[name.lower()] = character
 
+        self.check_friend_online_notifications()
         self.render_friends()
         return False
 
@@ -942,6 +1008,88 @@ class HorizonWindow(Adw.Application):
             self.friends_status_label.set_text(f"Could not refresh friends: {error_message}")
         self.render_friends()
         return False
+
+    def get_friend_online_sound_file(self):
+        for sound_file in FRIEND_ONLINE_SOUND_CANDIDATES:
+            if sound_file.exists():
+                return sound_file
+        return FRIEND_ONLINE_SOUND_CANDIDATES[0]
+
+    def get_current_friend_online_states(self):
+        states = {}
+
+        for friend_name in self.friend_names:
+            friend_key = friend_name.lower()
+            character = self.characters_by_name.get(friend_key)
+            states[friend_key] = bool(character and self.get_character_online(character))
+
+        return states
+
+    def check_friend_online_notifications(self):
+        current_states = self.get_current_friend_online_states()
+
+        # First completed refresh establishes the baseline silently.
+        # Later refreshes ding once if one or more friends changed from
+        # not-online to online, even if the total online count stayed the same.
+        if self.previous_friend_online_states is None:
+            self.previous_friend_online_states = current_states
+            return
+
+        any_newly_online = any(
+            is_online and not self.previous_friend_online_states.get(friend_key, False)
+            for friend_key, is_online in current_states.items()
+        )
+
+        self.previous_friend_online_states = current_states
+
+        if any_newly_online:
+            self.play_friend_online_sound()
+
+    def play_friend_online_sound(self):
+        sound_file = self.get_friend_online_sound_file()
+
+        if not sound_file.exists():
+            print(f"Friend online sound not found: {sound_file}")
+            return
+
+        # Prefer simple PipeWire/PulseAudio CLI playback when available. This has
+        # proven more reliable than Gtk.MediaFile on some desktops/runtimes.
+        for command in ("pw-play", "paplay", "gst-play-1.0"):
+            player = shutil.which(command)
+            if not player:
+                continue
+
+            try:
+                if command == "gst-play-1.0":
+                    subprocess.Popen(
+                        [player, "--no-interactive", str(sound_file)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    subprocess.Popen(
+                        [player, str(sound_file)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                return
+            except Exception as error:
+                print(f"Failed to play friend online sound with {command}: {error}")
+
+        # GTK fallback. Keep a reference alive so the short notification sound
+        # is not garbage-collected before playback starts.
+        try:
+            media_file = Gtk.MediaFile.new_for_file(
+                Gio.File.new_for_path(str(sound_file))
+            )
+            media_file.set_volume(1.0)
+            media_file.play()
+            self.friend_online_sound = media_file
+        except Exception as error:
+            print(f"Failed to play friend online sound: {error}")
+            display = Gdk.Display.get_default()
+            if display:
+                display.beep()
 
     def render_friends(self):
         if not self.friends_rows_box:
@@ -1019,17 +1167,33 @@ class HorizonWindow(Adw.Application):
         elif self.characters_by_name:
             job_string = "Character not found"
 
-        status_dot = "🟢" if online else "⚫"
+        status_dot_color = "#6aa84f" if online else "#4b5563"
         status_word = "Online" if online else "Offline"
+        status_word_color = "#6aa84f" if online else "#9ca3af"
+
+        name_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        name_row.set_halign(Gtk.Align.FILL)
+
+        status_dot_label = Gtk.Label()
+        status_dot_label.set_markup(
+            f'<span foreground="{status_dot_color}">●</span>'
+        )
+        status_dot_label.set_valign(Gtk.Align.CENTER)
+        name_row.append(status_dot_label)
 
         name_label = Gtk.Label()
         name_label.set_markup(f"<b>{html.escape(display_name)}</b>")
         name_label.set_xalign(0)
         name_label.set_wrap(True)
-        info_box.append(name_label)
+        name_label.set_hexpand(True)
+        name_row.append(name_label)
+        info_box.append(name_row)
 
-        detail_label = Gtk.Label(label=f"{status_dot} {status_word} • {job_string}")
-        detail_label.add_css_class("dim-label")
+        detail_label = Gtk.Label()
+        detail_label.set_markup(
+            f'<span foreground="{status_word_color}"><b>{status_word}</b></span>'
+            f' <span foreground="#9ca3af">• {html.escape(job_string)}</span>'
+        )
         detail_label.set_xalign(0)
         detail_label.set_wrap(True)
         info_box.append(detail_label)

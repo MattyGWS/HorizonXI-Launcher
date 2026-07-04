@@ -20,7 +20,7 @@ dist/
 # Flatpak builder
 .flatpak-builder/
 build-dir/
-
+.tar.gz
 # Logs
 *.log
 
