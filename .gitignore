@@ -55,3 +55,17 @@ tmp/
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Flatpak build output / generated bundles
+.flatpak-builder/
+build-dir/
+repo/
+flatpak/repo/
+*.flatpak
+*.flatpakref
+*.flatpakrepo
