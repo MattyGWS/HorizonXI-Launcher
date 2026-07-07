@@ -113,6 +113,33 @@ MAIN_ACTION_UPDATE_CHECK_FAILED = "update_check_failed"
 MAIN_ACTION_BUSY = "busy"
 
 
+# --- Editable launcher theme -------------------------------------------------
+# Change colours here first. load_custom_css() below reads these values and
+# turns them into the GTK CSS used by the launcher.
+#
+# This deliberately avoids styling every Gtk.Button globally, because GTK stack
+# switcher tabs are also buttons internally. Heavy global button styling makes
+# the tabs look like separate chunky buttons, which looked icky in testing.
+THEME_COLORS = {
+    "background": "#182631",          # main app background
+    "header": "#182631",              # top header bar
+    "panel": "#263946",               # preference rows/cards
+    "panel_hover": "#304756",         # row hover
+    "panel_soft": "#20313d",          # yells/friends/time panels
+    "text": "#edf7fb",                # main text
+    "muted_text": "#b9cbd4",          # subtitles/dim labels
+    "subtle_border": "#5f7682",       # quiet borders/separators
+    "accent": "#1781a1",              # primary buttons, progress, on toggles
+    "accent_hover": "#78d7f1",        # primary hover
+    "accent_text": "#10242f",         # text on accent buttons
+    "warning": "#e5ac4f",             # update button
+    "warning_text": "#221707",
+    "danger": "#d85c5c",              # nuclear reset/prohibited rows
+    "danger_hover": "#e36d6d",
+    "switch_off": "#94aab2",
+}
+
+
 class HorizonWindow(Adw.Application):
     def __init__(self):
         super().__init__(application_id="io.github.mattyws.HorizonXILauncher")
@@ -215,14 +242,25 @@ class HorizonWindow(Adw.Application):
         self.load_experimental_settings()
 
     def on_activate(self, app):
+        # Keep the launcher on a consistent HorizonXI-style dark palette even
+        # when the desktop is using a light GTK/libadwaita preference.
+        try:
+            Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+        except Exception:
+            pass
+
         self.window = Adw.ApplicationWindow(application=app)
+        self.window.add_css_class("horizon-window")
         self.window.connect("close-request", self.on_window_close_request)
         self.window.set_title("HorizonXI Launcher")
         self.window.set_default_size(1120, 640)
         self.window.set_size_request(900, 560)
 
         toolbar_view = Adw.ToolbarView()
+        toolbar_view.add_css_class("horizon-window")
+
         header = Adw.HeaderBar()
+        header.add_css_class("horizon-header")
         toolbar_view.add_top_bar(header)
 
         root_box = Gtk.Box(
@@ -233,6 +271,7 @@ class HorizonWindow(Adw.Application):
             margin_start=24,
             margin_end=24,
         )
+        root_box.add_css_class("horizon-root")
 
         header_overlay = Gtk.Overlay()
         header_overlay.set_vexpand(False)
@@ -245,6 +284,7 @@ class HorizonWindow(Adw.Application):
 
         title = Gtk.Label(label="HorizonXI Launcher")
         title.add_css_class("title-1")
+        title.add_css_class("horizon-title")
         title.set_halign(Gtk.Align.CENTER)
         header_center_box.append(title)
 
@@ -340,22 +380,219 @@ class HorizonWindow(Adw.Application):
         return False
 
     def load_custom_css(self):
-        css = b"""
+        c = THEME_COLORS
+        css = """
+        @define-color horizon_bg %(background)s;
+        @define-color horizon_header %(header)s;
+        @define-color horizon_panel %(panel)s;
+        @define-color horizon_panel_hover %(panel_hover)s;
+        @define-color horizon_panel_soft %(panel_soft)s;
+        @define-color horizon_text %(text)s;
+        @define-color horizon_muted %(muted_text)s;
+        @define-color horizon_border %(subtle_border)s;
+        @define-color horizon_accent %(accent)s;
+        @define-color horizon_accent_hover %(accent_hover)s;
+        @define-color horizon_accent_fg %(accent_text)s;
+        @define-color horizon_warning %(warning)s;
+        @define-color horizon_warning_fg %(warning_text)s;
+        @define-color horizon_danger %(danger)s;
+        @define-color horizon_danger_hover %(danger_hover)s;
+        @define-color horizon_switch_off %(switch_off)s;
+
+        window,
+        .horizon-window,
+        .horizon-root {
+            background-color: @horizon_bg;
+            color: @horizon_text;
+        }
+
+        headerbar,
+        .horizon-header {
+            background-color: @horizon_header;
+            color: @horizon_text;
+            box-shadow: none;
+        }
+
+        .horizon-title {
+            color: @horizon_accent_hover;
+        }
+
+        label,
+        .heading,
+        .title-1,
+        .title-2,
+        .title-3 {
+            color: @horizon_text;
+        }
+
+        .dim-label {
+            color: @horizon_muted;
+            opacity: 1.0;
+        }
+
+        preferencesgroup,
+        list,
+        listview,
+        .boxed-list,
+        scrolledwindow,
+        viewport {
+            background-color: transparent;
+            color: @horizon_text;
+        }
+
+        row,
+        .boxed-list row {
+            background-color: @horizon_panel;
+            color: @horizon_text;
+        }
+
+        row:hover,
+        .boxed-list row:hover {
+            background-color: @horizon_panel_hover;
+        }
+
+        /* Only style action classes. Do not globally style button, because
+           StackSwitcher tabs are buttons internally and should stay native. */
+        button.suggested-action {
+            background-color: @horizon_accent;
+            border-color: @horizon_accent;
+            color: @horizon_accent_fg;
+        }
+
+        button.suggested-action:hover {
+            background-color: @horizon_accent_hover;
+            border-color: @horizon_accent_hover;
+            color: @horizon_accent_fg;
+        }
+
+        button.destructive-action {
+            background-color: @horizon_danger;
+            border-color: @horizon_danger;
+            color: white;
+        }
+
+        button.destructive-action:hover {
+            background-color: @horizon_danger_hover;
+            border-color: @horizon_danger_hover;
+            color: white;
+        }
+
+        button.update-action,
+        .update-action {
+            background-color: @horizon_warning;
+            border-color: @horizon_warning;
+            color: @horizon_warning_fg;
+        }
+
+        button.update-action:hover,
+        .update-action:hover {
+            background-color: shade(@horizon_warning, 1.12);
+            border-color: shade(@horizon_warning, 1.12);
+            color: @horizon_warning_fg;
+        }
+
+        button.flat {
+            background-color: transparent;
+            border-color: transparent;
+            color: @horizon_muted;
+        }
+
+        button.flat:hover {
+            background-color: alpha(@horizon_accent, 0.12);
+            color: @horizon_text;
+        }
+
+        entry,
+        spinbutton,
+        dropdown,
+        combobox,
+        menubutton {
+            background-color: @horizon_panel_soft;
+            color: @horizon_text;
+            border-color: alpha(@horizon_border, 0.40);
+            border-radius: 8px;
+        }
+
+        entry:focus,
+        spinbutton:focus,
+        dropdown:focus,
+        combobox:focus {
+            border-color: @horizon_accent;
+        }
+
+        switch {
+            background-color: @horizon_switch_off;
+            border-color: alpha(@horizon_text, 0.20);
+            border-radius: 999px;
+            min-width: 44px;
+            min-height: 24px;
+        }
+
+        switch:checked {
+            background-color: @horizon_accent;
+            border-color: @horizon_accent;
+        }
+
+        switch:checked:hover {
+            background-color: @horizon_accent_hover;
+            border-color: @horizon_accent_hover;
+        }
+
+        switch slider {
+            background-color: @horizon_text;
+            border-radius: 999px;
+            min-width: 18px;
+            min-height: 18px;
+        }
+
+        switch:disabled,
+        button:disabled,
+        row:disabled {
+            opacity: 0.55;
+        }
+
+        progressbar trough {
+            background-color: @horizon_panel_soft;
+            border-radius: 999px;
+            min-height: 8px;
+        }
+
+        progressbar progress {
+            background-color: @horizon_accent;
+            border-radius: 999px;
+            min-height: 8px;
+        }
+
+        separator {
+            background-color: alpha(@horizon_border, 0.28);
+        }
+
+        scrollbar slider {
+            background-color: alpha(@horizon_accent, 0.45);
+            border-radius: 999px;
+        }
+
+        scrollbar slider:hover {
+            background-color: alpha(@horizon_accent_hover, 0.72);
+        }
+
         .vanatime-panel {
-            background: rgba(54, 54, 58, 0.58);
+            background-color: alpha(@horizon_panel_soft, 0.86);
+            border: 1px solid alpha(@horizon_accent, 0.16);
             border-radius: 10px;
             padding: 10px 14px;
         }
 
         .vanatime-divider {
-            background: rgba(180, 180, 190, 0.35);
+            background-color: alpha(@horizon_border, 0.35);
             min-height: 1px;
             margin-top: 4px;
             margin-bottom: 6px;
         }
 
         .yells-panel {
-            background: rgba(28, 39, 62, 0.62);
+            background-color: alpha(@horizon_panel_soft, 0.78);
+            border: 1px solid alpha(@horizon_accent, 0.10);
             border-radius: 10px;
             padding: 6px;
         }
@@ -365,14 +602,15 @@ class HorizonWindow(Adw.Application):
         }
 
         .yell-separator {
-            background: rgba(118, 132, 160, 0.18);
+            background-color: alpha(@horizon_border, 0.25);
             margin-left: 6px;
             margin-right: 6px;
             min-height: 1px;
         }
 
         .friends-panel {
-            background: rgba(54, 54, 58, 0.72);
+            background-color: alpha(@horizon_panel_soft, 0.78);
+            border: 1px solid alpha(@horizon_accent, 0.10);
             border-radius: 10px;
             padding: 6px;
         }
@@ -382,7 +620,7 @@ class HorizonWindow(Adw.Application):
         }
 
         .friend-separator {
-            background: rgba(150, 150, 160, 0.16);
+            background-color: alpha(@horizon_border, 0.24);
             margin-left: 6px;
             margin-right: 6px;
             min-height: 1px;
@@ -394,20 +632,15 @@ class HorizonWindow(Adw.Application):
             min-height: 28px;
         }
 
-        .update-action {
-            background: @warning_color;
-            color: @warning_fg_color;
-        }
-
         .prohibited-addon-row {
-            background: alpha(@error_color, 0.12);
-            color: @error_color;
+            background-color: alpha(@horizon_danger, 0.16);
+            color: @horizon_danger_hover;
         }
-        """
+        """ % c
 
         try:
             provider = Gtk.CssProvider()
-            provider.load_from_data(css)
+            provider.load_from_data(css.encode("utf-8"))
             display = Gdk.Display.get_default()
             if display:
                 Gtk.StyleContext.add_provider_for_display(
@@ -417,6 +650,7 @@ class HorizonWindow(Adw.Application):
                 )
         except Exception as error:
             print(f"Failed to load custom CSS: {error}")
+
 
     def build_main_page(self):
         main_box = Gtk.Box(
